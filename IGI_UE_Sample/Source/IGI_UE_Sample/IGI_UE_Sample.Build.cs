@@ -8,7 +8,7 @@ public class IGI_UE_Sample : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "IGI" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "IGI", "ACEDirectorRuntime" });
 
 		PrivateDependencyModuleNames.AddRange(new string[] {});
 	}

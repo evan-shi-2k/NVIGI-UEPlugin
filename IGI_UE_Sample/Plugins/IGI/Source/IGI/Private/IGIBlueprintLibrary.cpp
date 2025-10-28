@@ -13,7 +13,7 @@
 
 std::atomic<bool> UIGIGPTEvaluateAsync::IsRunning = false;
 
-UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateAsync(const FString& SystemPrompt, const FString& UserPrompt, const FString& AssistantPrompt)
+UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateAsync(const FString& UserPrompt)
 {
     if (IsRunning)
     {
@@ -22,11 +22,23 @@ UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateAsync(const FString& Syst
     }
 
     UIGIGPTEvaluateAsync* BlueprintNode = NewObject<UIGIGPTEvaluateAsync>();
-    BlueprintNode->SystemPrompt = SystemPrompt;
     BlueprintNode->UserPrompt = UserPrompt;
-    BlueprintNode->AssistantPrompt = AssistantPrompt;
     BlueprintNode->AddToRoot();
 
+    return BlueprintNode;
+}
+
+UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateStructuredAsync(const FString& UserPrompt)
+{
+    if (IsRunning)
+    {
+        UE_LOG(LogIGISDK, Log, TEXT("%s: GPT is already running! Request was ignored."), ANSI_TO_TCHAR(__FUNCTION__));
+        return nullptr;
+    }
+
+    UIGIGPTEvaluateAsync* BlueprintNode = NewObject<UIGIGPTEvaluateAsync>();
+    BlueprintNode->UserPrompt = UserPrompt;
+    BlueprintNode->AddToRoot();
     return BlueprintNode;
 }
 
@@ -52,7 +64,9 @@ void UIGIGPTEvaluateAsync::Activate()
                 FIGIGPT* GPT{ FModuleManager::GetModuleChecked<FIGIModule>(FName("IGI")).GetGPT()};
                 if (GPT != nullptr)
                 {
-                    result = GPT->Evaluate(TrimmedSystemPrompt, TrimmedUserPrompt, TrimmedAssistantPrompt);
+                    
+                    //result = GPT->Evaluate(TrimmedUserPrompt);
+                    result = GPT->EvaluateStructured(TrimmedUserPrompt);
 
                     AsyncTask(ENamedThreads::GameThread, [this, result]()
                         {

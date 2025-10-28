@@ -24,6 +24,18 @@
 #include <condition_variable>
 #include <thread>
 #include <mutex>
+#include <cstdlib>
+
+#include "HttpModule.h"
+#include "Interfaces/IHttpResponse.h"
+#include "Http.h"
+
+#include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
+#include "Misc/Paths.h"
+#include "HAL/PlatformFilemanager.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 
 namespace
 {
@@ -32,6 +44,26 @@ namespace
     constexpr std::size_t VRAM_BUDGET_RECOMMENDATION{ 1024 * 12 };
     constexpr std::size_t THREAD_NUM_RECOMMENDATION{ 1 }; // Recommended number of threads for CiG
     constexpr std::size_t CONTEXT_SIZE_RECOMMENDATION{ 4096 };
+}
+
+static FString Quote(const FString& S)
+{
+#if PLATFORM_WINDOWS
+    return FString::Printf(TEXT("\"%s\""), *S.Replace(TEXT("\""), TEXT("\\\"")));
+#else
+    return FString::Printf(TEXT("'%s'"), *S.Replace(TEXT("'"), TEXT("'\"'\"'")));
+#endif
+}
+
+static FString DefaultPythonExe()
+{
+#if PLATFORM_WINDOWS
+    // <ProjectDir>/ACE/ace_env/Scripts/python.exe
+    return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_env"), TEXT("Scripts"), TEXT("python.exe"));
+#else
+    // <ProjectDir>/ACE/ace_env/bin/python3
+    return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_env"), TEXT("bin"), TEXT("python3"));
+#endif
 }
 
 class FIGIGPT::Impl
@@ -123,7 +155,7 @@ public:
         }
     }
 
-    FString Evaluate(const FString& SystemPrompt, const FString& UserPrompt, const FString& AssistantPrompt)
+    FString Evaluate(const FString& UserPrompt)
     {
         FScopeLock Lock(&CS);
 
@@ -149,11 +181,15 @@ public:
                 const nvigi::InferenceDataText* text{};
                 slots->findAndValidateSlot(nvigi::kGPTDataSlotResponse, &text);
                 auto response = FString(StringCast<UTF8CHAR>(text->getUTF8Text()));
-                if (response.Find("<JSON>") != INDEX_NONE)
+                if (response.Contains("<JSON>") && response.Contains("</JSON>"))
                 {
+                    const int32 Start = response.Find("<JSON>") + 6;
+                    const int32 End = response.Find("</JSON>");
+                    const FString JsonSlice = response.Mid(Start, End - Start);
+                    cbkCtx->gptOutput += TEXT("\n{JSON}") + JsonSlice + TEXT("{/JSON}\n");
+
                     auto cpuBuffer = castTo<nvigi::CpuData>(text->utf8Text);
-                    ((uint8_t*)cpuBuffer->buffer)[0] = 0;
-                    cpuBuffer->sizeInBytes = 0;
+                    if (cpuBuffer) { ((uint8_t*)cpuBuffer->buffer)[0] = 0; cpuBuffer->sizeInBytes = 0; }
                 }
                 else
                 {
@@ -166,26 +202,14 @@ public:
                 return state;
             };
 
-        auto SystemPromptUTF = StringCast<UTF8CHAR>(*SystemPrompt);
-        nvigi::InferenceDataTextSTLHelper SystemPromptData(reinterpret_cast<const char*>(SystemPromptUTF.Get()));
+        // TODO: Read system/assistant prompt from disk
 
         auto UserPromptUTF = StringCast<UTF8CHAR>(*UserPrompt);
         nvigi::InferenceDataTextSTLHelper UserPromptData(reinterpret_cast<const char*>(UserPromptUTF.Get()));
 
-        auto AssistantPromptUTF = StringCast<UTF8CHAR>(*AssistantPrompt);
-        nvigi::InferenceDataTextSTLHelper AssistantPromptData(reinterpret_cast<const char*>(AssistantPromptUTF.Get()));
-
         TArray<nvigi::InferenceDataSlot> inSlots = {
             {nvigi::kGPTDataSlotUser, UserPromptData}
         };
-        if (SystemPrompt.Len() > 0u)
-        {
-            inSlots.Add({ nvigi::kGPTDataSlotSystem, SystemPromptData });
-        }
-        if (AssistantPrompt.Len() > 0u)
-        {
-            inSlots.Add({ nvigi::kGPTDataSlotAssistant, AssistantPromptData });
-        }
 
         nvigi::InferenceDataSlotArray inputs = { static_cast<size_t>(inSlots.Num()), inSlots.GetData() };
 
@@ -220,6 +244,80 @@ public:
         return response;
     }
 
+    FString EvaluateStructured(const FString& UserPrompt)
+    {
+        const FString BaseUrl = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_BASE_URL")).IsEmpty()
+            ? TEXT("http://127.0.0.1:8000/v1")
+            : FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_BASE_URL"));
+
+        const FString ApiKey = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_API_KEY"));
+        const FString Model = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_MODEL_NAME")).IsEmpty()
+            ? TEXT("meta/llama-3.2-3b-instruct")
+            : FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_MODEL_NAME"));
+
+        const FString Mode = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_MODE")).IsEmpty()
+            ? TEXT("grammar") : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_MODE"));
+
+        const FString Script = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SCRIPT_PATH")).IsEmpty()
+            ? FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("nim_structured.py")))
+            : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SCRIPT_PATH"));
+
+        const FString SysPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SYSTEM_PROMPT_PATH")).IsEmpty()
+            ? FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("system_prompt.txt")))
+            : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SYSTEM_PROMPT_PATH"));
+
+        const FString AsstPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_ASSISTANT_PROMPT_PATH"));
+        const FString GramPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_GRAMMAR_PATH")).IsEmpty()
+            ? FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("command_schema.ebnf")))
+            : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_GRAMMAR_PATH"));
+
+        const FString JsonPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_JSON_PATH"));
+
+        FString PythonExe = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_PYTHON_EXE"));
+        if (PythonExe.IsEmpty()) PythonExe = DefaultPythonExe();
+        if (!FPaths::FileExists(PythonExe))
+        {
+            UE_LOG(LogIGISDK, Warning, TEXT("Python not found at %s; using 'python' from PATH"), *PythonExe);
+            PythonExe = TEXT("python");
+        }
+
+        TArray<FString> Args;
+        Args.Add(Quote(Script));
+        Args.Add(TEXT("--base_url ") + Quote(BaseUrl));
+        if (!ApiKey.IsEmpty()) Args.Add(TEXT("--api_key ") + Quote(ApiKey));
+        Args.Add(TEXT("--model ") + Quote(Model));
+        Args.Add(TEXT("--mode ") + Quote(Mode));
+        Args.Add(TEXT("--system_prompt_path ") + Quote(SysPath));
+        if (!AsstPath.IsEmpty()) Args.Add(TEXT("--assistant_prompt_path ") + Quote(AsstPath));
+
+        if (Mode.Equals(TEXT("grammar"), ESearchCase::IgnoreCase))
+            Args.Add(TEXT("--grammar_path ") + Quote(GramPath));
+        else
+            Args.Add(TEXT("--json_path ") + Quote(JsonPath));
+
+        Args.Add(TEXT("--user ") + Quote(UserPrompt));
+
+        const FString ParamLine = FString::Join(Args, TEXT(" "));
+        FString Out, Err;
+        int32 Code = -1;
+
+        UE_LOG(LogIGISDK, Log, TEXT("Structured: %s %s"), *PythonExe, *ParamLine);
+        const bool bLaunched = FPlatformProcess::ExecProcess(*PythonExe, *ParamLine, &Code, &Out, &Err);
+        if (!bLaunched)
+        {
+            UE_LOG(LogIGISDK, Error, TEXT("Failed to launch Python process"));
+            return TEXT("{\"error\":\"python_launch_failed\"}");
+        }
+        if (Code != 0)
+        {
+            UE_LOG(LogIGISDK, Warning, TEXT("Structured runner exit %d. stderr: %s"), Code, *Err);
+            return Out.IsEmpty()
+                ? FString::Printf(TEXT("{\"error\":\"runner_failed\",\"detail\":%s}"), *Quote(Err))
+                : Out;
+        }
+        return Out;
+    }
+
 private:
     FCriticalSection CS;
 
@@ -230,8 +328,6 @@ private:
     nvigi::InferenceInstance* GPTInstance{ nullptr };
 };
 
-// ----------------------------------
-
 FIGIGPT::FIGIGPT(FIGIModule* IGIModule)
 {
     Pimpl = MakePimpl<FIGIGPT::Impl>(IGIModule);
@@ -239,7 +335,12 @@ FIGIGPT::FIGIGPT(FIGIModule* IGIModule)
 
 FIGIGPT::~FIGIGPT() {}
 
-FString FIGIGPT::Evaluate(const FString& SystemPrompt, const FString& UserPrompt, const FString& AssistantPrompt)
+FString FIGIGPT::Evaluate(const FString& UserPrompt)
 {
-    return Pimpl->Evaluate(SystemPrompt, UserPrompt, AssistantPrompt);
+    return Pimpl->Evaluate(UserPrompt);
+}
+
+FString FIGIGPT::EvaluateStructured(const FString& UserPrompt)
+{
+    return Pimpl->EvaluateStructured(UserPrompt);
 }

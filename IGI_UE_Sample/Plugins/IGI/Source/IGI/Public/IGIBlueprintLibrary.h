@@ -19,7 +19,12 @@ class IGI_API UIGIGPTEvaluateAsync : public UBlueprintAsyncActionBase
 public:
 
     UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Async)", BlueprintInternalUseOnly = "true"))
-    static UIGIGPTEvaluateAsync* GPTEvaluateAsync(const FString& SystemPrompt, const FString& UserPrompt, const FString& AssistantPrompt);
+    static UIGIGPTEvaluateAsync* GPTEvaluateAsync(const FString& UserPrompt);
+
+    UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Structured, Async)", BlueprintInternalUseOnly = "true"))
+    static UIGIGPTEvaluateAsync* GPTEvaluateStructuredAsync(const FString& UserPrompt);
+
+    void Start() { Activate(); }
 
     UPROPERTY(BlueprintAssignable)
     FIGIGPTEvaluateAsyncOutputPin OnResponse;
@@ -33,7 +38,10 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "IGI|GPT", meta = (BBlueprintInternalUseOnly = "true"))
     FString AssistantPrompt;
 
-private:
+    UPROPERTY(BlueprintReadOnly, Category = "IGI|GPT", meta = (BBlueprintInternalUseOnly = "true"))
+    FString SchemaJSON;
+
+protected:
     virtual void Activate() override;
 
     static std::atomic<bool> IsRunning;

@@ -15,7 +15,9 @@ public:
     FIGIGPT(FIGIModule* IGIModule);
     virtual ~FIGIGPT();
 
-    FString Evaluate(const FString& SystemPrompt, const FString& UserPrompt, const FString& AssistantPrompt);
+    FString Evaluate(const FString& UserPrompt);
+
+    FString EvaluateStructured(const FString& UserPrompt);
 
 private:
     class Impl;
