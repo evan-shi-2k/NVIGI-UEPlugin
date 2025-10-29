@@ -26,16 +26,18 @@
 #include <mutex>
 #include <cstdlib>
 
-#include "HttpModule.h"
-#include "Interfaces/IHttpResponse.h"
-#include "Http.h"
-
-#include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
-#include "HAL/PlatformFilemanager.h"
+#include "Misc/FileHelper.h"
+#include "Misc/ScopeLock.h"
+#include "Misc/MonitoredProcess.h"
+#include "Misc/DateTime.h"
+#include "Misc/Timespan.h"
+
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFilemanager.h"
 #include "HAL/PlatformProcess.h"
+#include "HAL/ThreadSafeBool.h"
 
 namespace
 {
@@ -44,6 +46,10 @@ namespace
     constexpr std::size_t VRAM_BUDGET_RECOMMENDATION{ 1024 * 12 };
     constexpr std::size_t THREAD_NUM_RECOMMENDATION{ 1 }; // Recommended number of threads for CiG
     constexpr std::size_t CONTEXT_SIZE_RECOMMENDATION{ 4096 };
+
+    static constexpr double kRequestTimeoutSeconds = 30.0;
+    static constexpr double kStartupTimeoutSeconds = 10.0;
+    static constexpr double kReadPollIntervalSeconds = 0.01;
 }
 
 static FString Quote(const FString& S)
@@ -65,6 +71,133 @@ static FString DefaultPythonExe()
     return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_env"), TEXT("bin"), TEXT("python3"));
 #endif
 }
+
+class FPythonMonitoredSingleShot
+{
+public:
+    FPythonMonitoredSingleShot() { ConfigureFromEnv(); }
+    ~FPythonMonitoredSingleShot() { /* nothing persistent to stop */ }
+
+    // Environment / defaults ---------------------------------------------------
+    void ConfigureFromEnv()
+    {
+        FPlatformMisc::SetEnvironmentVar(TEXT("PYTHONIOENCODING"), TEXT("utf-8"));
+
+        BaseUrl = GetEnvOrDefault(TEXT("NIM_BASE_URL"), TEXT("http://127.0.0.1:8000/v1"));
+        ApiKey = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_API_KEY"));
+        Model = GetEnvOrDefault(TEXT("NIM_MODEL_NAME"), TEXT("meta/llama-3.2-3b-instruct"));
+        Mode = GetEnvOrDefault(TEXT("IGI_NIM_MODE"), TEXT("grammar"));
+
+        ScriptPath = GetEnvOrDefault(TEXT("IGI_NIM_SCRIPT_PATH"),
+            FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("nim_structured.py"))));
+        SystemPromptPath = GetEnvOrDefault(TEXT("IGI_NIM_SYSTEM_PROMPT_PATH"),
+            FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("system_prompt.txt"))));
+        AssistantPromptPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_ASSISTANT_PROMPT_PATH"));
+        GrammarPath = GetEnvOrDefault(TEXT("IGI_NIM_GRAMMAR_PATH"),
+            FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("command_schema.ebnf"))));
+        JsonSchemaPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_JSON_PATH"));
+
+        PythonExe = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_PYTHON_EXE"));
+        if (PythonExe.IsEmpty()) PythonExe = DefaultPythonExe();
+        if (!FPaths::FileExists(PythonExe))
+        {
+            UE_LOG(LogIGISDK, Warning, TEXT("Python not found at %s; will try 'python' in PATH"), *PythonExe);
+            PythonExe = TEXT("python");
+        }
+    }
+
+    // Fire one request via FMonitoredProcess, return the last non-empty stdout line.
+    FString RequestSingleShotJSON(const FString& UserJsonOneLine, double TimeoutSec = 30.0)
+    {
+        // Build arguments: -u nim_structured.py ... --user "<one-line-json>"
+        TArray<FString> Args;
+        Args.Add(TEXT("-u"));
+        Args.Add(Quote(ScriptPath));
+        Args.Add(TEXT("--base-url"));      Args.Add(Quote(BaseUrl));
+        if (!ApiKey.IsEmpty()) { Args.Add(TEXT("--api-key")); Args.Add(Quote(ApiKey)); }
+        Args.Add(TEXT("--model"));         Args.Add(Quote(Model));
+        Args.Add(TEXT("--mode"));          Args.Add(Quote(Mode));
+        if (!SystemPromptPath.IsEmpty()) { Args.Add(TEXT("--system"));    Args.Add(Quote(SystemPromptPath)); }
+        if (!AssistantPromptPath.IsEmpty()) { Args.Add(TEXT("--assistant")); Args.Add(Quote(AssistantPromptPath)); }
+        if (Mode.Equals(TEXT("grammar"), ESearchCase::IgnoreCase))
+        {
+            if (!GrammarPath.IsEmpty()) { Args.Add(TEXT("--grammar"));    Args.Add(Quote(GrammarPath)); }
+        }
+        else
+        {
+            if (!JsonSchemaPath.IsEmpty()) { Args.Add(TEXT("--json-schema")); Args.Add(Quote(JsonSchemaPath)); }
+        }
+        Args.Add(TEXT("--user"));
+        Args.Add(Quote(UserJsonOneLine));
+
+        const FString ArgLine = FString::Join(Args, TEXT(" "));
+        UE_LOG(LogIGISDK, Log, TEXT("[monitored] Launch: %s %s"), *PythonExe, *ArgLine);
+
+        // Hidden + create pipes to capture stdout/stderr
+        TSharedPtr<FMonitoredProcess> Proc = MakeShared<FMonitoredProcess>(
+            PythonExe, ArgLine, /*bHidden=*/true, /*bCreatePipes=*/true);
+
+        FString LastNonEmpty;
+        Proc->OnOutput().BindLambda([&LastNonEmpty](const FString& Line)
+            {
+                const FString Trimmed = Line.TrimStartAndEnd();
+                if (!Trimmed.IsEmpty())
+                {
+                    LastNonEmpty = Trimmed;
+                }
+                UE_LOG(LogIGISDK, Verbose, TEXT("[monitored][out] %s"), *Line);
+            });
+
+        // NOTE: FMonitoredProcess has no separate OnError; stderr is merged into OnOutput.
+
+        bool bLaunched = Proc->Launch();
+        if (!bLaunched)
+        {
+            UE_LOG(LogIGISDK, Error, TEXT("[monitored] launch failed"));
+            return TEXT("{\"error\":\"launch_failed\"}");
+        }
+
+        const double T0 = FPlatformTime::Seconds();
+        bool bRunning = true;
+        while (bRunning && (FPlatformTime::Seconds() - T0) < TimeoutSec)
+        {
+            bRunning = Proc->Update();            // drains pipes
+            FPlatformProcess::Sleep(0.01);
+        }
+
+        if (bRunning)
+        {
+            UE_LOG(LogIGISDK, Warning, TEXT("[monitored] timeout; terminating child"));
+            Proc->Cancel(/*KillTree=*/true);
+            return TEXT("{\"error\":\"timeout\"}");
+        }
+
+        const int32 ReturnCode = Proc->GetReturnCode();
+
+        if (LastNonEmpty.IsEmpty())
+        {
+            // If the script printed nothing useful, surface an error payload.
+            return FString::Printf(TEXT("{\"error\":\"empty_stdout\",\"exit\":%d}"), ReturnCode);
+        }
+
+        return LastNonEmpty;
+    }
+
+private:
+    static FString GetEnvOrDefault(const TCHAR* Name, const FString& Fallback)
+    {
+        const FString V = FPlatformMisc::GetEnvironmentVariable(Name);
+        return V.IsEmpty() ? Fallback : V;
+    }
+
+private:
+    // Config (members so we don’t recompute every call)
+    FString PythonExe;
+    FString ScriptPath;
+    FString BaseUrl, ApiKey, Model, Mode;
+    FString SystemPromptPath, AssistantPromptPath;
+    FString GrammarPath, JsonSchemaPath;
+};
 
 class FIGIGPT::Impl
 {
@@ -138,10 +271,15 @@ public:
             UE_LOG(LogIGISDK, Fatal, TEXT("Unable to create gpt.ggml.cuda instance: %s"), *GetIGIStatusString(Result));
             GPTInstance = nullptr;
         }
+
+        PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
+        PythonClient->ConfigureFromEnv();
     }
 
     virtual ~Impl()
     {
+        PythonClient.Reset();
+
         if (GPTInstance != nullptr)
         {
             GPTInterface->destroyInstance(GPTInstance);
@@ -157,7 +295,8 @@ public:
 
     FString Evaluate(const FString& UserPrompt)
     {
-        FScopeLock Lock(&CS);
+        // TODO: think about NVIGI+ACE for this porject
+        FScopeLock Lock(&CS_ACE);
 
         struct BasicCallbackCtx
         {
@@ -246,86 +385,22 @@ public:
 
     FString EvaluateStructured(const FString& UserPrompt)
     {
-        const FString BaseUrl = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_BASE_URL")).IsEmpty()
-            ? TEXT("http://127.0.0.1:8000/v1")
-            : FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_BASE_URL"));
+        const FString Escaped = UserPrompt.ReplaceCharWithEscapedChar();
+        const FString OneLine = FString::Printf(TEXT("{\"user\":\"%s\"}"), *Escaped);
 
-        const FString ApiKey = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_API_KEY"));
-        const FString Model = FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_MODEL_NAME")).IsEmpty()
-            ? TEXT("meta/llama-3.2-3b-instruct")
-            : FPlatformMisc::GetEnvironmentVariable(TEXT("NIM_MODEL_NAME"));
-
-        const FString Mode = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_MODE")).IsEmpty()
-            ? TEXT("grammar") : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_MODE"));
-
-        const FString Script = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SCRIPT_PATH")).IsEmpty()
-            ? FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("nim_structured.py")))
-            : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SCRIPT_PATH"));
-
-        const FString SysPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SYSTEM_PROMPT_PATH")).IsEmpty()
-            ? FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("system_prompt.txt")))
-            : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_SYSTEM_PROMPT_PATH"));
-
-        const FString AsstPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_ASSISTANT_PROMPT_PATH"));
-        const FString GramPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_GRAMMAR_PATH")).IsEmpty()
-            ? FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("command_schema.ebnf")))
-            : FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_GRAMMAR_PATH"));
-
-        const FString JsonPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_JSON_PATH"));
-
-        FString PythonExe = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_PYTHON_EXE"));
-        if (PythonExe.IsEmpty()) PythonExe = DefaultPythonExe();
-        if (!FPaths::FileExists(PythonExe))
-        {
-            UE_LOG(LogIGISDK, Warning, TEXT("Python not found at %s; using 'python' from PATH"), *PythonExe);
-            PythonExe = TEXT("python");
-        }
-
-        TArray<FString> Args;
-        Args.Add(Quote(Script));
-        Args.Add(TEXT("--base_url ") + Quote(BaseUrl));
-        if (!ApiKey.IsEmpty()) Args.Add(TEXT("--api_key ") + Quote(ApiKey));
-        Args.Add(TEXT("--model ") + Quote(Model));
-        Args.Add(TEXT("--mode ") + Quote(Mode));
-        Args.Add(TEXT("--system_prompt_path ") + Quote(SysPath));
-        if (!AsstPath.IsEmpty()) Args.Add(TEXT("--assistant_prompt_path ") + Quote(AsstPath));
-
-        if (Mode.Equals(TEXT("grammar"), ESearchCase::IgnoreCase))
-            Args.Add(TEXT("--grammar_path ") + Quote(GramPath));
-        else
-            Args.Add(TEXT("--json_path ") + Quote(JsonPath));
-
-        Args.Add(TEXT("--user ") + Quote(UserPrompt));
-
-        const FString ParamLine = FString::Join(Args, TEXT(" "));
-        FString Out, Err;
-        int32 Code = -1;
-
-        UE_LOG(LogIGISDK, Log, TEXT("Structured: %s %s"), *PythonExe, *ParamLine);
-        const bool bLaunched = FPlatformProcess::ExecProcess(*PythonExe, *ParamLine, &Code, &Out, &Err);
-        if (!bLaunched)
-        {
-            UE_LOG(LogIGISDK, Error, TEXT("Failed to launch Python process"));
-            return TEXT("{\"error\":\"python_launch_failed\"}");
-        }
-        if (Code != 0)
-        {
-            UE_LOG(LogIGISDK, Warning, TEXT("Structured runner exit %d. stderr: %s"), Code, *Err);
-            return Out.IsEmpty()
-                ? FString::Printf(TEXT("{\"error\":\"runner_failed\",\"detail\":%s}"), *Quote(Err))
-                : Out;
-        }
-        return Out;
+        return PythonClient->RequestSingleShotJSON(OneLine, /*TimeoutSec=*/30.0);
     }
 
 private:
-    FCriticalSection CS;
-
     // Non-owning ptr
     FIGIModule* IGIModulePtr;
 
     nvigi::IGeneralPurposeTransformer* GPTInterface{ nullptr };
     nvigi::InferenceInstance* GPTInstance{ nullptr };
+    FCriticalSection CS_ACE;
+
+    TUniquePtr<FPythonMonitoredSingleShot> PythonClient;
+    FString TempOut;
 };
 
 FIGIGPT::FIGIGPT(FIGIModule* IGIModule)
