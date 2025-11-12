@@ -1,7 +1,10 @@
 #pragma once
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+
 #include "CommandSchema.h"
+#include "ACEConsoleCommandRegistry.h"
+#include "ACEWorldActionRegistry.h"
 #include "CommandRouterComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlannerText, const FString&, VisibleText);
@@ -46,6 +49,8 @@ public:
 
 private:
     UPROPERTY() TWeakObjectPtr<AActor> PendingInstigator;
+
+    FString BuildToolChooserUserJSON(const FString& UserDirective, const TArray<struct FConsoleCandidate>& Cands) const;
 
     UFUNCTION()
     void HandleGPTResponse(FString Out);

@@ -15,6 +15,8 @@ public:
     FIGIGPT(FIGIModule* IGIModule);
     virtual ~FIGIGPT();
 
+    void WarmUpPython(double TimeoutSec = 60.0);
+
     FString Evaluate(const FString& UserPrompt);
 
     FString EvaluateStructured(const FString& UserPrompt);

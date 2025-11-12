@@ -105,6 +105,14 @@ void FIGIModule::StartupModule()
     Pimpl = MakePimpl<FIGIModule::Impl>();
     Pimpl->StartupModule();
     UE_LOG(LogIGISDK, Log, TEXT("IGI module started"));
+
+    if (LoadIGICore())
+    {
+        if (FIGIGPT* GPT = GetGPT())
+        {
+            GPT->WarmUpPython(/*TimeoutSec=*/30.0);
+        }
+    }
 }
 
 void FIGIModule::ShutdownModule()

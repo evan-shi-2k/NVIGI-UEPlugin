@@ -11,6 +11,7 @@
 #include "IGIGPT.h"
 #include "IGILog.h"
 
+//static std::atomic<bool> GDidPythonWarmup{ false };
 std::atomic<bool> UIGIGPTEvaluateAsync::IsRunning = false;
 
 UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateAsync(const FString& UserPrompt)
@@ -64,7 +65,12 @@ void UIGIGPTEvaluateAsync::Activate()
                 FIGIGPT* GPT{ FModuleManager::GetModuleChecked<FIGIModule>(FName("IGI")).GetGPT()};
                 if (GPT != nullptr)
                 {
-                    
+                    //if (!GDidPythonWarmup.exchange(true))
+                    //{
+                    //    UE_LOG(LogIGISDK, Log, TEXT("[IGI] Performing one-time Python warmup before first request"));
+                    //    GPT->WarmUpPython(/*TimeoutSec=*/20.0);
+                    //}
+
                     //result = GPT->Evaluate(TrimmedUserPrompt);
                     result = GPT->EvaluateStructured(TrimmedUserPrompt);
 

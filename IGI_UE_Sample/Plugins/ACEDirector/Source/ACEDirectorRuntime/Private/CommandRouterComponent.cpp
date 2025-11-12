@@ -5,9 +5,12 @@
 #include "Serialization/JsonSerializer.h"
 #include "Misc/DefaultValueHelper.h"
 
-#include "IGIBlueprintLibrary.h"
 #include "Engine/World.h"
 #include "Kismet/KismetStringLibrary.h"
+
+#include "IGIBlueprintLibrary.h"
+#include "ACEToolGrammarBuilder.h"
+#include "ACEConsoleTool.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogACEPlanner, Log, All);
 
@@ -40,6 +43,15 @@ UCommandRouterComponent::UCommandRouterComponent()
 void UCommandRouterComponent::RouteFromText(const FString& UserDirective, AActor* Instigator)
 {
     PendingInstigator = Instigator;
+
+    // 1) Retrieve top-K sets
+    TArray<FConsoleCandidate> ConsoleCands;
+    if (UACEConsoleCommandRegistry* RC = GetWorld()->GetGameInstance()->GetSubsystem<UACEConsoleCommandRegistry>())
+        RC->RetrieveTopK(UserDirective, /*K=*/5, ConsoleCands);
+
+    TArray<FWorldActionCandidate> WorldCands;
+    if (UACEWorldActionRegistry* RW = GetWorld()->GetGameInstance()->GetSubsystem<UACEWorldActionRegistry>())
+        RW->RetrieveTopK(UserDirective, /*K=*/7, WorldCands);
 
     //UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateAsync(UserDirective);
     UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredAsync(UserDirective);

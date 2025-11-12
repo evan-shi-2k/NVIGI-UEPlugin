@@ -78,7 +78,6 @@ public:
     FPythonMonitoredSingleShot() { ConfigureFromEnv(); }
     ~FPythonMonitoredSingleShot() { /* nothing persistent to stop */ }
 
-    // Environment / defaults ---------------------------------------------------
     void ConfigureFromEnv()
     {
         FPlatformMisc::SetEnvironmentVar(TEXT("PYTHONIOENCODING"), TEXT("utf-8"));
@@ -106,10 +105,8 @@ public:
         }
     }
 
-    // Fire one request via FMonitoredProcess, return the last non-empty stdout line.
     FString RequestSingleShotJSON(const FString& UserJsonOneLine, double TimeoutSec = 30.0)
     {
-        // Build arguments: -u nim_structured.py ... --user "<one-line-json>"
         TArray<FString> Args;
         Args.Add(TEXT("-u"));
         Args.Add(Quote(ScriptPath));
@@ -133,7 +130,6 @@ public:
         const FString ArgLine = FString::Join(Args, TEXT(" "));
         UE_LOG(LogIGISDK, Log, TEXT("[monitored] Launch: %s %s"), *PythonExe, *ArgLine);
 
-        // Hidden + create pipes to capture stdout/stderr
         TSharedPtr<FMonitoredProcess> Proc = MakeShared<FMonitoredProcess>(
             PythonExe, ArgLine, /*bHidden=*/true, /*bCreatePipes=*/true);
 
@@ -148,8 +144,6 @@ public:
                 UE_LOG(LogIGISDK, Verbose, TEXT("[monitored][out] %s"), *Line);
             });
 
-        // NOTE: FMonitoredProcess has no separate OnError; stderr is merged into OnOutput.
-
         bool bLaunched = Proc->Launch();
         if (!bLaunched)
         {
@@ -161,7 +155,7 @@ public:
         bool bRunning = true;
         while (bRunning && (FPlatformTime::Seconds() - T0) < TimeoutSec)
         {
-            bRunning = Proc->Update();            // drains pipes
+            bRunning = Proc->Update();
             FPlatformProcess::Sleep(0.01);
         }
 
@@ -176,7 +170,6 @@ public:
 
         if (LastNonEmpty.IsEmpty())
         {
-            // If the script printed nothing useful, surface an error payload.
             return FString::Printf(TEXT("{\"error\":\"empty_stdout\",\"exit\":%d}"), ReturnCode);
         }
 
@@ -191,7 +184,6 @@ private:
     }
 
 private:
-    // Config (members so we don’t recompute every call)
     FString PythonExe;
     FString ScriptPath;
     FString BaseUrl, ApiKey, Model, Mode;
@@ -290,6 +282,29 @@ public:
         {
             IGIModulePtr->UnloadIGIFeature(nvigi::plugin::gpt::ggml::cuda::kId, GPTInterface);
             IGIModulePtr = nullptr;
+        }
+    }
+
+    void WarmUpPython(double TimeoutSec)
+    {
+        if (!PythonClient.IsValid())
+        {
+            PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
+            PythonClient->ConfigureFromEnv();
+        }
+
+        UE_LOG(LogIGISDK, Log, TEXT("[warmup] Starting Python warm-up (timeout=%.1fs)"), TimeoutSec);
+
+        const FString WarmupReq = TEXT("{\"user\":\"__warmup__\"}");
+        const FString Resp = PythonClient->RequestSingleShotJSON(WarmupReq, TimeoutSec);
+
+        if (Resp.StartsWith(TEXT("{\"error\"")))
+        {
+            UE_LOG(LogIGISDK, Warning, TEXT("[warmup] Python warm-up returned: %s"), *Resp);
+        }
+        else
+        {
+            UE_LOG(LogIGISDK, Log, TEXT("[warmup] Python warm-up OK"));
         }
     }
 
@@ -409,6 +424,11 @@ FIGIGPT::FIGIGPT(FIGIModule* IGIModule)
 }
 
 FIGIGPT::~FIGIGPT() {}
+
+void FIGIGPT::WarmUpPython(double TimeoutSec)
+{
+    Pimpl->WarmUpPython(TimeoutSec);
+}
 
 FString FIGIGPT::Evaluate(const FString& UserPrompt)
 {
