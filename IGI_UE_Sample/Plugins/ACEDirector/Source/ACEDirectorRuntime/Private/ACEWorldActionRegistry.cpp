@@ -6,7 +6,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Dom/JsonObject.h"
 
-FString UACEWorldActionRegistry::JsonPath() { return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE/world_actions.json")); }
+FString UACEWorldActionRegistry::JsonPath() { return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE/data/world_actions.json")); }
 
 void UACEWorldActionRegistry::Initialize(FSubsystemCollectionBase& Collection)
 {

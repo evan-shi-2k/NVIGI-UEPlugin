@@ -43,5 +43,4 @@ private:
     static float LexicalBonus(const TArray<FString>& Q, const FConsoleCommandEntry& E);
     static float CosineLike(const TArray<FString>& Q, const TArray<FString>& D);
     bool LoadJSON();
-    bool LoadCSV();
 };

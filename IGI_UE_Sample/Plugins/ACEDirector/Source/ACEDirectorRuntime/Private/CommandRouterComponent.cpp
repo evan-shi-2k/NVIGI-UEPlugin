@@ -35,6 +35,51 @@ static FString JsonValueToCompactString(const TSharedPtr<FJsonValue>& V)
     }
 }
 
+static FString JsonEscape(const FString& In) {
+    FString Out; Out.Reserve(In.Len() + 8);
+    for (TCHAR c : In) {
+        switch (c) {
+        case TEXT('\"'): Out += TEXT("\\\""); break;
+        case TEXT('\\'): Out += TEXT("\\\\"); break;
+        case TEXT('\b'): Out += TEXT("\\b");  break;
+        case TEXT('\f'): Out += TEXT("\\f");  break;
+        case TEXT('\n'): Out += TEXT("\\n");  break;
+        case TEXT('\r'): Out += TEXT("\\r");  break;
+        case TEXT('\t'): Out += TEXT("\\t");  break;
+        default:
+            if (c < 0x20) { Out += TEXT(' '); }
+            else { Out += c; }
+        }
+    }
+    return Out;
+}
+
+FString UCommandRouterComponent::BuildToolChooserUserJSON(
+    const FString& UserText,
+    const TArray<FConsoleCandidate>& Cands) const
+{
+    FString Out(TEXT("{\"user\":\""));
+    Out += JsonEscape(UserText);
+    Out += TEXT("\",\"console_candidates\":[");
+    for (int32 i = 0; i < Cands.Num(); ++i) {
+        const auto& C = Cands[i];
+        Out += TEXT("{\"name\":\"") + JsonEscape(C.Name) + TEXT("\",\"argNames\":\"") + JsonEscape(C.ArgNames) + TEXT("\",\"doc\":\"") + JsonEscape(C.Doc) + TEXT("\",\"aliases\":[");
+        for (int32 j = 0; j < C.Aliases.Num(); ++j) {
+            Out += TEXT("\"") + JsonEscape(C.Aliases[j]) + TEXT("\"");
+            if (j + 1 < C.Aliases.Num()) Out += TEXT(",");
+        }
+        Out += TEXT("],\"tags\":[");
+        for (int32 j = 0; j < C.Tags.Num(); ++j) {
+            Out += TEXT("\"") + JsonEscape(C.Tags[j]) + TEXT("\"");
+            if (j + 1 < C.Tags.Num()) Out += TEXT(",");
+        }
+        Out += FString::Printf(TEXT("],\"score\":%.3f,\"idx\":%d}"), C.Score, i);
+        if (i + 1 < Cands.Num()) Out += TEXT(",");
+    }
+    Out += TEXT("]}");
+    return Out;
+}
+
 UCommandRouterComponent::UCommandRouterComponent()
 {
     PrimaryComponentTick.bCanEverTick = false;
@@ -44,17 +89,26 @@ void UCommandRouterComponent::RouteFromText(const FString& UserDirective, AActor
 {
     PendingInstigator = Instigator;
 
-    // 1) Retrieve top-K sets
+    // Retrieve top-K sets
     TArray<FConsoleCandidate> ConsoleCands;
     if (UACEConsoleCommandRegistry* RC = GetWorld()->GetGameInstance()->GetSubsystem<UACEConsoleCommandRegistry>())
         RC->RetrieveTopK(UserDirective, /*K=*/5, ConsoleCands);
 
     TArray<FWorldActionCandidate> WorldCands;
     if (UACEWorldActionRegistry* RW = GetWorld()->GetGameInstance()->GetSubsystem<UACEWorldActionRegistry>())
-        RW->RetrieveTopK(UserDirective, /*K=*/7, WorldCands);
+        RW->RetrieveTopK(UserDirective, /*K=*/5, WorldCands);
+
+    TArray<FString> IntentNames;  for (auto& c : WorldCands)   IntentNames.Add(c.Intent);
+    TArray<FString> ConsoleNames; for (auto& c : ConsoleCands) ConsoleNames.Add(c.Name);
+
+    const FString Grammar = UACEToolGrammarBuilder::BuildPerQueryGrammar(IntentNames, ConsoleNames);
+    const FString GrammarPath = UACEToolGrammarBuilder::WriteTempGrammarFile(Grammar);
+
+    const FString Packed = BuildToolChooserUserJSON(UserDirective, ConsoleCands);
 
     //UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateAsync(UserDirective);
-    UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredAsync(UserDirective);
+    //UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredAsync(UserDirective);
+    UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredWithGrammarAsync(Packed, GrammarPath);
     if (!Node)
     {
         UE_LOG(LogACEPlanner, Warning, TEXT("GPTEvaluateAsync returned null"));
@@ -94,9 +148,32 @@ void UCommandRouterComponent::UnregisterAction(const FString& IntentName)
         });
 }
 
+// TODO: Refactor
 void UCommandRouterComponent::HandleGPTResponse(FString Out)
 {
     OnPlannerText.Broadcast(Out);
+
+    TSharedPtr<FJsonObject> Root;
+    auto Reader = TJsonReaderFactory<>::Create(Out);
+    if (FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid())
+    {
+        FString Tool;
+        if (Root->TryGetStringField(TEXT("tool"), Tool))
+        {
+            if (Tool.Equals(TEXT("console.execute"), ESearchCase::IgnoreCase))
+            {
+                const TSharedPtr<FJsonObject>* Console = nullptr;
+                if (Root->TryGetObjectField(TEXT("console"), Console) && Console && Console->IsValid())
+                {
+                    FString Cmd, Args; (*Console)->TryGetStringField(TEXT("command"), Cmd);
+                    (*Console)->TryGetStringField(TEXT("args"), Args);
+                    FString Line = Cmd; if (!Args.IsEmpty()) { Line += TEXT(" "); Line += Args; }
+                    UACEConsoleTool::Execute(this, Line);
+                    return;
+                }
+            }
+        }
+    }
 
     FACECommandList Plan;
     if (!TryParsePlan(Out, Plan))

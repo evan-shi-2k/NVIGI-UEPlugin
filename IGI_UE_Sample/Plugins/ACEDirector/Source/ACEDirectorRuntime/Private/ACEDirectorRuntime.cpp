@@ -17,4 +17,4 @@ void FACEDirectorRuntimeModule::ShutdownModule()
 
 #undef LOCTEXT_NAMESPACE
 	
-IMPLEMENT_MODULE(FACEDirectorRuntimeModule, ACEDirector)
+IMPLEMENT_MODULE(FACEDirectorRuntimeModule, ACEDirectorRuntime)

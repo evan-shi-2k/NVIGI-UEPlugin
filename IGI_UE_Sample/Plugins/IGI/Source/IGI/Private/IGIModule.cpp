@@ -5,6 +5,7 @@
 #include "IGIModule.h"
 
 #include "CoreMinimal.h"
+#include "Async/Async.h"
 #include "Misc/MessageDialog.h"
 #include "Modules/ModuleManager.h"
 #include "Interfaces/IPluginManager.h"
@@ -110,7 +111,14 @@ void FIGIModule::StartupModule()
     {
         if (FIGIGPT* GPT = GetGPT())
         {
-            GPT->WarmUpPython(/*TimeoutSec=*/30.0);
+            //GPT->WarmUpPython(/*TimeoutSec=*/30.0);
+            UE_LOG(LogIGISDK, Log, TEXT("[IGI] Queuing persistent Python start on background thread..."));
+            AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [GPT]()
+            {
+                UE_LOG(LogIGISDK, Log, TEXT("[IGI] Background thread starting persistent Python (--serve-stdin)..."));
+                GPT->StartPersistentPython(/*TimeoutSec*/ 30.0);
+                UE_LOG(LogIGISDK, Log, TEXT("[IGI] Background thread finished StartPersistentPython."));
+            });
         }
     }
 }

@@ -6,13 +6,10 @@
 #include "Serialization/JsonReader.h"
 
 void UACEConsoleCommandRegistry::Initialize(FSubsystemCollectionBase& Collection) {
-    if (!LoadJSON()) {
-        LoadCSV();
-    }
+    LoadJSON();
 }
 
-static FString RegPathJSON() { return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE/console_registry.json")); }
-static FString RegPathCSV() { return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE/console_registry.csv")); }
+static FString RegPathJSON() { return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE/data/console_registry.json")); }
 
 bool UACEConsoleCommandRegistry::LoadJSON() {
     FString Raw;
@@ -40,27 +37,7 @@ bool UACEConsoleCommandRegistry::LoadJSON() {
     return Entries.Num() > 0;
 }
 
-bool UACEConsoleCommandRegistry::LoadCSV() {
-    FString Raw;
-    if (!FPaths::FileExists(RegPathCSV()) || !FFileHelper::LoadFileToString(Raw, *RegPathCSV())) return false;
-    Entries.Reset();
-    TArray<FString> Lines; Raw.ParseIntoArrayLines(Lines, /*CullEmpty*/true);
-    // naive CSV: name,aliases(;),doc,tags(;),argNames
-    for (int i = 0; i < Lines.Num(); ++i) {
-        TArray<FString> Cells; Lines[i].ParseIntoArray(Cells, TEXT(","), /*CullEmpty*/false);
-        if (Cells.Num() < 1) continue;
-        FConsoleCommandEntry E;
-        E.Name = Cells[0].TrimStartAndEnd();
-        if (Cells.Num() > 1) Cells[1].ParseIntoArray(E.Aliases, TEXT(";"), true);
-        if (Cells.Num() > 2) E.Doc = Cells[2].TrimStartAndEnd();
-        if (Cells.Num() > 3) Cells[3].ParseIntoArray(E.Tags, TEXT(";"), true);
-        if (Cells.Num() > 4) E.ArgNames = Cells[4].TrimStartAndEnd();
-        if (!E.Name.IsEmpty()) Entries.Add(MoveTemp(E));
-    }
-    return Entries.Num() > 0;
-}
-
-// --- simple retrieval
+// Simple retrieval
 TArray<FString> UACEConsoleCommandRegistry::Tokenize(const FString& S) {
     FString Lower = S.ToLower();
     for (TCHAR& c : Lower) if (!FChar::IsAlnum(c)) c = ' ';
