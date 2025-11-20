@@ -3,7 +3,7 @@
 #include "Misc/FileHelper.h"
 #include "HAL/FileManager.h"
 
-static FString JsonEscape(const FString& In) {
+FString UACEToolGrammarBuilder::JsonEscape(const FString& In) {
     FString Out; Out.Reserve(In.Len() + 8);
     for (TCHAR c : In) {
         switch (c) {

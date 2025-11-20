@@ -35,42 +35,26 @@ static FString JsonValueToCompactString(const TSharedPtr<FJsonValue>& V)
     }
 }
 
-static FString JsonEscape(const FString& In) {
-    FString Out; Out.Reserve(In.Len() + 8);
-    for (TCHAR c : In) {
-        switch (c) {
-        case TEXT('\"'): Out += TEXT("\\\""); break;
-        case TEXT('\\'): Out += TEXT("\\\\"); break;
-        case TEXT('\b'): Out += TEXT("\\b");  break;
-        case TEXT('\f'): Out += TEXT("\\f");  break;
-        case TEXT('\n'): Out += TEXT("\\n");  break;
-        case TEXT('\r'): Out += TEXT("\\r");  break;
-        case TEXT('\t'): Out += TEXT("\\t");  break;
-        default:
-            if (c < 0x20) { Out += TEXT(' '); }
-            else { Out += c; }
-        }
-    }
-    return Out;
-}
-
 FString UCommandRouterComponent::BuildToolChooserUserJSON(
     const FString& UserText,
     const TArray<FConsoleCandidate>& Cands) const
 {
     FString Out(TEXT("{\"user\":\""));
-    Out += JsonEscape(UserText);
+    Out += UACEToolGrammarBuilder::JsonEscape(UserText);
     Out += TEXT("\",\"console_candidates\":[");
     for (int32 i = 0; i < Cands.Num(); ++i) {
         const auto& C = Cands[i];
-        Out += TEXT("{\"name\":\"") + JsonEscape(C.Name) + TEXT("\",\"argNames\":\"") + JsonEscape(C.ArgNames) + TEXT("\",\"doc\":\"") + JsonEscape(C.Doc) + TEXT("\",\"aliases\":[");
+        Out += TEXT("{\"name\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Name) 
+             + TEXT("\",\"argNames\":\"") + UACEToolGrammarBuilder::JsonEscape(C.ArgNames) 
+             + TEXT("\",\"doc\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Doc) 
+             + TEXT("\",\"aliases\":[");
         for (int32 j = 0; j < C.Aliases.Num(); ++j) {
-            Out += TEXT("\"") + JsonEscape(C.Aliases[j]) + TEXT("\"");
+            Out += TEXT("\"") + UACEToolGrammarBuilder::JsonEscape(C.Aliases[j]) + TEXT("\"");
             if (j + 1 < C.Aliases.Num()) Out += TEXT(",");
         }
         Out += TEXT("],\"tags\":[");
         for (int32 j = 0; j < C.Tags.Num(); ++j) {
-            Out += TEXT("\"") + JsonEscape(C.Tags[j]) + TEXT("\"");
+            Out += TEXT("\"") + UACEToolGrammarBuilder::JsonEscape(C.Tags[j]) + TEXT("\"");
             if (j + 1 < C.Tags.Num()) Out += TEXT(",");
         }
         Out += FString::Printf(TEXT("],\"score\":%.3f,\"idx\":%d}"), C.Score, i);
