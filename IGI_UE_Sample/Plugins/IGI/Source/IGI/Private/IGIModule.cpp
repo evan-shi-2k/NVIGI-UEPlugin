@@ -12,6 +12,7 @@
 
 #include "IGICore.h"
 #include "IGIGPT.h"
+#include "IGIASR.h"
 #include "IGILog.h"
 
 #include "nvigi.h"
@@ -60,6 +61,7 @@ public:
         FScopeLock Lock(&CS);
 
         GPT.Reset();
+        ASR.Reset();
         Core.Reset();
         return true;
     }
@@ -90,9 +92,20 @@ public:
         return GPT.Get();
     }
 
+    FIGIASR* GetASR(FIGIModule* Module)
+    {
+        FScopeLock Lock(&CS);
+        if (!ASR.IsValid())
+        {
+            ASR = MakeUnique<FIGIASR>(Module);
+        }
+        return ASR.Get();
+    }
+
 private:
     TUniquePtr<FIGICore> Core;
     TUniquePtr<FIGIGPT> GPT;
+    TUniquePtr<FIGIASR> ASR;
 
     FCriticalSection CS;
     FString IGICoreLibraryPath;
@@ -202,6 +215,11 @@ const FString FIGIModule::GetModelsPath() const
 FIGIGPT* FIGIModule::GetGPT()
 {
     return Pimpl->GetGPT(this);
+}
+
+FIGIASR* FIGIModule::GetASR()
+{
+    return Pimpl->GetASR(this);
 }
 
 FString GetIGIStatusString(nvigi::Result Result)

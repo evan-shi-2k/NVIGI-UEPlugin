@@ -6,6 +6,7 @@
 #include "Templates/PimplPtr.h"
 
 class FIGIGPT;
+class FIGIASR;
 
 // These replicate some of the types defined in nvigi.h
 namespace nvigi
@@ -38,6 +39,7 @@ public:
     const FString GetModelsPath() const;
 
     FIGIGPT* GetGPT();
+    FIGIASR* GetASR();
 
     void Test();
 
