@@ -25,8 +25,11 @@ public class ACEDirectorRuntime : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-                "Core","CoreUObject","Engine","Json","JsonUtilities",
-                "HTTP"
+                "Core","CoreUObject","Engine",
+				"Json","JsonUtilities",
+                "HTTP",
+                "Voice","OnlineSubsystem","OnlineSubsystemUtils",
+                "AudioMixer","AudioCaptureCore"
             }
 			);
 			

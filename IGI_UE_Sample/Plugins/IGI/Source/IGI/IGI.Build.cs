@@ -27,7 +27,7 @@ public class IGI : ModuleRules
 		PublicIncludePaths.AddRange(
 			new string[] {
                 Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "nvigi_core", "include"]),
-                Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "plugins", "sdk", "include"]),
+                Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "include"]),
 				// ... add public include paths required here ...
 			}
 			);
@@ -72,8 +72,9 @@ public class IGI : ModuleRules
 
         PublicDefinitions.Add("AIM_CORE_BINARY_NAME=TEXT(\"nvigi.core.framework.dll\")");
 
-        string PluginsBinaryPath = Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "plugins", "sdk", "bin", "x64"]);
-        string GPTModelPath = Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "plugins", "sdk", "data", "nvigi.models", "nvigi.plugin.gpt.ggml", "{8E31808B-C182-4016-9ED8-64804FF5B40D}"]);
+        string PluginsBinaryPath = Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "bin", "x64"]);
+        string GPTModelPath = Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "data", "nvigi.models", "nvigi.plugin.gpt.ggml", "{8E31808B-C182-4016-9ED8-64804FF5B40D}"]);
+        string ASRModelPath = Path.Combine([PluginDirectory, "ThirdParty", "nvigi_pack", "data", "nvigi.models", "nvigi.plugin.asr.ggml", "{5CAD3A03-1272-4D43-9F3D-655417526170}"]);
 
         // Core framework DLL
         RuntimeDependencies.Add(Path.Combine(PluginsBinaryPath, "nvigi.core.framework.dll"));
@@ -89,6 +90,11 @@ public class IGI : ModuleRules
 
         RuntimeDependencies.Add(Path.Combine(GPTModelPath, "nemotron-4-mini-4b-instruct_q4_0.gguf"));
         RuntimeDependencies.Add(Path.Combine(GPTModelPath, "nvigi.model.config.json"));
+
+        RuntimeDependencies.Add(Path.Combine(PluginsBinaryPath, "nvigi.plugin.asr.ggml.cuda.dll"));
+
+        RuntimeDependencies.Add(Path.Combine(ASRModelPath, "ggml-whisper-small.gguf"));
+        RuntimeDependencies.Add(Path.Combine(ASRModelPath, "nvigi.model.config.json"));
 
         AddEngineThirdPartyPrivateStaticDependencies(Target, "DX12");
     }

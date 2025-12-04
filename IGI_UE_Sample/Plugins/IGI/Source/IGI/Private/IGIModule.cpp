@@ -33,8 +33,8 @@ public:
         // This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
 
         FString BaseDir = IPluginManager::Get().FindPlugin("IGI")->GetBaseDir();
-        IGICoreLibraryPath = FPaths::Combine(*BaseDir, TEXT("ThirdParty/nvigi_pack/plugins/sdk/bin/x64/nvigi.core.framework.dll"));
-        IGIModelsPath = FPaths::Combine(*BaseDir, TEXT("ThirdParty/nvigi_pack/plugins/sdk/data/nvigi.models"));
+        IGICoreLibraryPath = FPaths::Combine(*BaseDir, TEXT("ThirdParty/nvigi_pack/bin/x64/nvigi.core.framework.dll"));
+        IGIModelsPath = FPaths::Combine(*BaseDir, TEXT("ThirdParty/nvigi_pack/data/nvigi.models"));
     }
 
     void ShutdownModule()
@@ -120,28 +120,34 @@ void FIGIModule::StartupModule()
     Pimpl->StartupModule();
     UE_LOG(LogIGISDK, Log, TEXT("IGI module started"));
 
-    if (LoadIGICore())
-    {
-        if (FIGIGPT* GPT = GetGPT())
-        {
-            // Default behavior: single-shot Python client per request.
-            // If you want to hide the cost of the very first NIM/LLM inference,
-            // you can optionally pre-warm on a background thread by uncommenting
-            // the block below.
-            //
-            // UE_LOG(LogIGISDK, Log, TEXT("[IGI] Queuing one-time Python warm-up on background thread..."));
-            // AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [GPT]()
-            // {
-            //     GPT->WarmUpPython(/*TimeoutSec=*/30.0);
-            //     UE_LOG(LogIGISDK, Log, TEXT("[IGI] Warm-up completed."));
-            // });
-            //
-            // NOTE:
-            // The persistent (--serve-stdin) Python client is available via
-            // FIGIGPT::StartPersistentPython, but is not started automatically
-            // here so the default path stays simpler and fully single-shot.
-        }
-    }
+    //if (LoadIGICore())
+    //{
+    //    if (FIGIGPT* GPT = GetGPT())
+    //    {
+    //        // Default behavior: single-shot Python client per request.
+    //        // If you want to hide the cost of the very first NIM/LLM inference,
+    //        // you can optionally pre-warm on a background thread by uncommenting
+    //        // the block below.
+    //        //
+    //        //UE_LOG(LogIGISDK, Log, TEXT("[IGI] Queuing one-time Python warm-up on background thread..."));
+    //        //AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [GPT]()
+    //        //{
+    //        //    GPT->WarmUpPython(/*TimeoutSec=*/30.0);
+    //        //    UE_LOG(LogIGISDK, Log, TEXT("[IGI] Warm-up completed."));
+    //        //});
+    //        //
+    //        // NOTE:
+    //        // The persistent (--serve-stdin) Python client is available via
+    //        // FIGIGPT::StartPersistentPython, but is not started automatically
+    //        // here so the default path stays simpler and fully single-shot.
+
+    //        UE_LOG(LogIGISDK, Log, TEXT("IGI: GPT Subsystem Initialized."));
+    //    }
+    //    if (FIGIASR* ASR = GetASR())
+    //    {
+    //        UE_LOG(LogIGISDK, Log, TEXT("IGI: ASR Subsystem Initialized."));
+    //    }
+    //}
 }
 
 void FIGIModule::ShutdownModule()

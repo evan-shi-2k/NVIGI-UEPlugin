@@ -10,6 +10,8 @@
 #include <atomic>
 #include "IGIBlueprintLibrary.generated.h"
 
+// ---------------------- GPT async node ----------------------
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FIGIGPTEvaluateAsyncOutputPin, FString, Response);
 
 UCLASS(BlueprintType, meta = (ExposedAsyncProxy = AsyncAction))
@@ -24,8 +26,8 @@ public:
     UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Structured, Async)", BlueprintInternalUseOnly = "true"))
     static UIGIGPTEvaluateAsync* GPTEvaluateStructuredAsync(const FString& UserPrompt);
 
-    UFUNCTION(BlueprintCallable, meta = (WorldContext = "IGI|GPT", DisplayName = "Send text to GPT (Structured + Grammar)"), Category = "IGI|GPT")
-    static class UIGIGPTEvaluateAsync* GPTEvaluateStructuredWithGrammarAsync(const FString& UserJSON, const FString& GrammarPath);
+    UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Structured + Grammar)", BlueprintInternalUseOnly = "true"))
+    static UIGIGPTEvaluateAsync* GPTEvaluateStructuredWithGrammarAsync(const FString& UserJSON, const FString& GrammarPath);
 
     void Start() { Activate(); }
 
@@ -47,6 +49,48 @@ public:
     UPROPERTY() bool bUseGrammar = false;
     UPROPERTY() FString UserPayload;
     UPROPERTY() FString GrammarFile;
+
+protected:
+    virtual void Activate() override;
+
+    static std::atomic<bool> IsRunning;
+};
+
+// ---------------------- ASR async node ----------------------
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+    FIGIASREvaluateAsyncOutputPin,
+    FString, Transcript,
+    bool, bIsError);
+
+UCLASS(BlueprintType, meta = (ExposedAsyncProxy = AsyncAction))
+class IGI_API UIGIASREvaluateAsync : public UBlueprintAsyncActionBase
+{
+    GENERATED_BODY()
+public:
+    UFUNCTION(BlueprintCallable, Category = "IGI|ASR", meta = (DisplayName = "Send voice to ASR (Async)", BlueprintInternalUseOnly = "true"))
+    static UIGIASREvaluateAsync* ASRTranscribeFloatAsync(
+        const TArray<float>& PCMFloat,
+        int32 InSampleRateHz,
+        int32 InNumChannels,
+        bool  bInIsFinal);
+
+    void Start() { Activate(); }
+
+    UPROPERTY(BlueprintAssignable)
+    FIGIASREvaluateAsyncOutputPin OnResponse;
+
+    UPROPERTY(BlueprintReadOnly, Category = "IGI|ASR", meta = (BBlueprintInternalUseOnly = "true"))
+    TArray<float> AudioPCM;
+
+    UPROPERTY(BlueprintReadOnly, Category = "IGI|ASR", meta = (BBlueprintInternalUseOnly = "true"))
+    int32 SampleRateHz = 16000;
+
+    UPROPERTY(BlueprintReadOnly, Category = "IGI|ASR", meta = (BBlueprintInternalUseOnly = "true"))
+    int32 NumChannels = 1;
+
+    UPROPERTY(BlueprintReadOnly, Category = "IGI|ASR", meta = (BBlueprintInternalUseOnly = "true"))
+    bool bIsFinal = true;
 
 protected:
     virtual void Activate() override;

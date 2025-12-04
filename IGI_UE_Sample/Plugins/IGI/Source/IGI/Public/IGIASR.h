@@ -9,15 +9,9 @@
 
 #include "IGIModule.h"
 
-/**
- * Thin wrapper over an NVIGI ASR instance (e.g., Whisper).
- *
- * NOTE: This is a skeleton. All NVIGI calls are TODOs in the .cpp.
- */
 class IGI_API FIGIASR
 {
 public:
-    // Non-owning pointer to IGI module (same pattern as FIGIGPT).
     explicit FIGIASR(FIGIModule* InIGIModule);
     virtual ~FIGIASR();
 

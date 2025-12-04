@@ -418,7 +418,7 @@ public:
     Impl(FIGIModule* IGIModule)
         : IGIModulePtr(IGIModule)
     {
-        nvigi::Result Result = nvigi::kResultOk;
+        /*nvigi::Result Result = nvigi::kResultOk;
 
         IGIModulePtr->LoadIGIFeature(nvigi::plugin::gpt::ggml::cuda::kId, &GPTInterface, nullptr);
 
@@ -433,7 +433,7 @@ public:
         Result = params.chain(common);
         if (Result != nvigi::kResultOk)
         {
-            UE_LOG(LogIGISDK, Error, TEXT("Unable to chain common parameters; cannot use CiG: %s"), *GetIGIStatusString(Result));
+            UE_LOG(LogIGISDK, Error, TEXT("[GPT] Unable to chain common parameters; cannot use CiG: %s"), *GetIGIStatusString(Result));
             GPTInstance = nullptr;
         }
 
@@ -456,34 +456,34 @@ public:
                     Result = params.chain(d3d12Params);
                     if (Result != nvigi::kResultOk)
                     {
-                        UE_LOG(LogIGISDK, Error, TEXT("Unable to chain D3D12 parameters; cannot use CiG: %s"), *GetIGIStatusString(Result));
+                        UE_LOG(LogIGISDK, Error, TEXT("[GPT] Unable to chain D3D12 parameters; cannot use CiG: %s"), *GetIGIStatusString(Result));
                         GPTInstance = nullptr;
                     }
                 }
                 else
                 {
-                    UE_LOG(LogIGISDK, Error, TEXT("Unable to retrieve D3D12 device and command queue from UE; cannot use CiG: %s"), *GetIGIStatusString(Result));
+                    UE_LOG(LogIGISDK, Error, TEXT("[GPT] Unable to retrieve D3D12 device and command queue from UE; cannot use CiG: %s"), *GetIGIStatusString(Result));
                     GPTInstance = nullptr;
                 }
             }
             else
             {
-                UE_LOG(LogIGISDK, Error, TEXT("Unable to retrieve RHI instance from UE; cannot use CiG: %s"), *GetIGIStatusString(Result));
+                UE_LOG(LogIGISDK, Error, TEXT("[GPT] Unable to retrieve RHI instance from UE; cannot use CiG: %s"), *GetIGIStatusString(Result));
                 GPTInstance = nullptr;
             }
         }
         else
         {
-            UE_LOG(LogIGISDK, Log, TEXT("UE not using D3D12; cannot use CiG: %s"), *GetIGIStatusString(Result));
+            UE_LOG(LogIGISDK, Log, TEXT("[GPT] UE not using D3D12; cannot use CiG: %s"), *GetIGIStatusString(Result));
             GPTInstance = nullptr;
         }
 
         Result = GPTInterface->createInstance(params, &GPTInstance);
         if (Result != nvigi::kResultOk)
         {
-            UE_LOG(LogIGISDK, Fatal, TEXT("Unable to create gpt.ggml.cuda instance: %s"), *GetIGIStatusString(Result));
+            UE_LOG(LogIGISDK, Fatal, TEXT("[GPT] Unable to create gpt.ggml.cuda instance: %s"), *GetIGIStatusString(Result));
             GPTInstance = nullptr;
-        }
+        }*/
 
         PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
         PythonClient->ConfigureFromEnv();
@@ -493,7 +493,7 @@ public:
     {
         PythonClient.Reset();
 
-        if (GPTInstance != nullptr)
+        /*if (GPTInstance != nullptr)
         {
             GPTInterface->destroyInstance(GPTInstance);
             GPTInstance = nullptr;
@@ -503,7 +503,7 @@ public:
         {
             IGIModulePtr->UnloadIGIFeature(nvigi::plugin::gpt::ggml::cuda::kId, GPTInterface);
             IGIModulePtr = nullptr;
-        }
+        }*/
     }
 
     void WarmUpPython(double TimeoutSec)
@@ -531,7 +531,6 @@ public:
 
     FString Evaluate(const FString& UserPrompt)
     {
-        // TODO: think about NVIGI+ACE for this porject
         FScopeLock Lock(&CS_ACE);
 
         struct BasicCallbackCtx
