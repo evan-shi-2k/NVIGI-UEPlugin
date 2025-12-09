@@ -150,33 +150,52 @@ public:
 
         if (PCM16.Num() == 0)
         {
-            UE_LOG(LogIGISDK, Warning, TEXT("[ASR] TranscribePCM16 called with empty buffer"));
+            UE_LOG(LogIGISDK, Warning,
+                TEXT("[ASR] TranscribePCM16 called with empty buffer"));
             return FString();
         }
 
         if (NumChannels <= 0)
         {
             UE_LOG(LogIGISDK, Warning,
-                TEXT("[ASR] TranscribePCM16 called with invalid NumChannels=%d"), NumChannels);
+                TEXT("[ASR] TranscribePCM16 called with invalid NumChannels=%d"),
+                NumChannels);
             return FString();
         }
 
         if (SampleRateHz != REQUIRED_SAMPLE_RATE_HZ)
         {
             UE_LOG(LogIGISDK, Warning,
-                TEXT("[ASR] Expected %d Hz mono PCM16, got %d Hz. Please resample before calling TranscribePCM16."),
-                REQUIRED_SAMPLE_RATE_HZ, SampleRateHz);
-            // We still proceed, but behavior is undefined from NVIGI side.
+                TEXT("[ASR] Expected sample rate %d Hz, got %d Hz"),
+                REQUIRED_SAMPLE_RATE_HZ,
+                SampleRateHz);
+        }
+
+        static constexpr int32 MAX_SAMPLES =
+            30 * REQUIRED_SAMPLE_RATE_HZ; // 30 seconds at 16k
+
+        const int32 InputNumSamples = PCM16.Num();
+        const int32 EffectiveNumSamples =
+            FMath::Min(InputNumSamples, MAX_SAMPLES);
+
+        TArray<int16> ClippedPCM;
+        ClippedPCM.Append(PCM16.GetData(), EffectiveNumSamples);
+
+        if (InputNumSamples > MAX_SAMPLES)
+        {
+            UE_LOG(LogIGISDK, Warning,
+                TEXT("[ASR] Input buffer too long (%d samples). Truncating to %d samples."),
+                InputNumSamples, EffectiveNumSamples);
         }
 
         TArray<int16> MonoPCM;
         if (NumChannels == 1)
         {
-            MonoPCM = PCM16;
+            MonoPCM = ClippedPCM;
         }
         else
         {
-            const int32 NumFrames = PCM16.Num() / NumChannels;
+            const int32 NumFrames = ClippedPCM.Num() / NumChannels;
             MonoPCM.SetNumUninitialized(NumFrames);
 
             for (int32 FrameIdx = 0; FrameIdx < NumFrames; ++FrameIdx)
@@ -185,9 +204,9 @@ public:
                 for (int32 Ch = 0; Ch < NumChannels; ++Ch)
                 {
                     const int32 SampleIndex = FrameIdx * NumChannels + Ch;
-                    if (PCM16.IsValidIndex(SampleIndex))
+                    if (ClippedPCM.IsValidIndex(SampleIndex))
                     {
-                        Sum += PCM16[SampleIndex];
+                        Sum += ClippedPCM[SampleIndex];
                     }
                 }
 
@@ -196,14 +215,48 @@ public:
                     : 0;
 
                 MonoPCM[FrameIdx] = static_cast<int16>(
-                    FMath::Clamp(Avg,
+                    FMath::Clamp(
+                        Avg,
                         static_cast<int32>(MIN_int16),
                         static_cast<int32>(MAX_int16)));
             }
 
             UE_LOG(LogIGISDK, Verbose,
-                TEXT("[ASR] Downmixed %d-channel audio to mono (%d frames)."),
-                NumChannels, MonoPCM.Num());
+                TEXT("[ASR] Downmixed %d-channel audio to mono (%d frames)"),
+                NumChannels, NumFrames);
+        }
+
+        {
+            int16 MinSample = MAX_int16;
+            int16 MaxSample = MIN_int16;
+            int64 SumAbs = 0;
+            for (int32 i = 0; i < MonoPCM.Num(); ++i)
+            {
+                const int16 S = MonoPCM[i];
+                MinSample = FMath::Min(MinSample, S);
+                MaxSample = FMath::Max(MaxSample, S);
+                SumAbs += FMath::Abs((int32)S);
+            }
+
+            const float DurationSec =
+                (SampleRateHz > 0)
+                ? float(MonoPCM.Num()) / float(SampleRateHz)
+                : 0.0f;
+
+            const float MeanAbs =
+                (MonoPCM.Num() > 0)
+                ? float(SumAbs) / float(MonoPCM.Num())
+                : 0.0f;
+
+            UE_LOG(LogIGISDK, Log,
+                TEXT("[ASR] TranscribePCM16: Frames=%d, SR=%d, Dur=%.2fs, Min=%d, Max=%d, MeanAbs=%.1f, bIsFinal=%s"),
+                MonoPCM.Num(),
+                SampleRateHz,
+                DurationSec,
+                (int32)MinSample,
+                (int32)MaxSample,
+                MeanAbs,
+                bIsFinal ? TEXT("true") : TEXT("false"));
         }
 
         std::vector<int16> AudioSamples;
@@ -214,8 +267,9 @@ public:
         }
 
         nvigi::InferenceDataAudioSTLHelper AudioData(AudioSamples, 1 /* mono */);
-
-        nvigi::InferenceDataSlot AudioSlot{ nvigi::kASRWhisperDataSlotAudio, AudioData };
+        nvigi::InferenceDataSlot AudioSlot{
+            nvigi::kASRWhisperDataSlotAudio, AudioData
+        };
         nvigi::InferenceDataSlotArray Inputs{ 1, &AudioSlot };
 
         struct FASRCallbackCtx
@@ -223,32 +277,44 @@ public:
             FString TranscribedText;
         } CallbackCtx;
 
-        auto AsrCallback = [](const nvigi::InferenceExecutionContext* ExecCtx,
-            nvigi::InferenceExecutionState State,
-            void* UserData) -> nvigi::InferenceExecutionState
-        {
-            if (!UserData || !ExecCtx || !ExecCtx->outputs)
+        auto AsrCallback =
+            [](const nvigi::InferenceExecutionContext* ExecCtx,
+                nvigi::InferenceExecutionState State,
+                void* UserData) -> nvigi::InferenceExecutionState
             {
-                return nvigi::kInferenceExecutionStateInvalid;
-            }
+                if (!UserData)
+                {
+                    return nvigi::kInferenceExecutionStateInvalid;
+                }
 
-            auto* Ctx = static_cast<FASRCallbackCtx*>(UserData);
+                auto* Ctx = static_cast<FASRCallbackCtx*>(UserData);
 
-            const nvigi::InferenceDataText* TextSlot = nullptr;
-            ExecCtx->outputs->findAndValidateSlot(nvigi::kASRWhisperDataSlotTranscribedText, &TextSlot);
-            if (TextSlot)
-            {
-                const std::string Utf8Text = TextSlot->getUTF8Text();
-                Ctx->TranscribedText = FString(UTF8_TO_TCHAR(Utf8Text.c_str()));
-            }
+                if (ExecCtx && ExecCtx->outputs)
+                {
+                    const nvigi::InferenceDataText* TextSlot = nullptr;
+                    ExecCtx->outputs->findAndValidateSlot(
+                        nvigi::kASRWhisperDataSlotTranscribedText,
+                        &TextSlot);
 
-            // We are not cancelling, just propagate state.
-            return State;
-        };
+                    if (TextSlot)
+                    {
+                        const std::string Utf8Text = TextSlot->getUTF8Text();
+                        const FString Chunk =
+                            FString(UTF8_TO_TCHAR(Utf8Text.c_str()));
+
+                        Ctx->TranscribedText += Chunk;
+
+                        UE_LOG(LogIGISDK, Verbose,
+                            TEXT("[ASR] Callback state=%d, chunk=\"%s\""),
+                            (int32)State,
+                            *Chunk);
+                    }
+                }
+
+                return State;
+            };
 
         nvigi::ASRWhisperRuntimeParameters RuntimeParams{};
-
-        RuntimeParams.sampling = nvigi::ASRWhisperSamplingStrategy::eBeamSearch;
 
         nvigi::InferenceExecutionContext Ctx{};
         Ctx.instance = AsrInstance;
@@ -258,11 +324,6 @@ public:
         Ctx.runtimeParameters = RuntimeParams;
         Ctx.outputs = nullptr;
 
-        UE_LOG(LogIGISDK, Verbose,
-            TEXT("[ASR] TranscribePCM16: Samples=%d, SampleRate=%d, Channels=%d, bIsFinal=%s"),
-            PCM16.Num(), SampleRateHz, NumChannels,
-            bIsFinal ? TEXT("true") : TEXT("false"));
-
         const nvigi::Result EvalResult = AsrInstance->evaluate(&Ctx);
         if (EvalResult != nvigi::kResultOk)
         {
@@ -271,6 +332,10 @@ public:
                 *GetIGIStatusString(EvalResult));
             return FString();
         }
+
+        UE_LOG(LogIGISDK, Log,
+            TEXT("[ASR] Final transcript=\"%s\""),
+            *CallbackCtx.TranscribedText);
 
         return CallbackCtx.TranscribedText;
     }

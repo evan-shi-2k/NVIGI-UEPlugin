@@ -8,8 +8,11 @@
 #include "VoiceModule.h"
 #include "Interfaces/VoiceCapture.h"
 #include "Logging/LogMacros.h"
+#include "Misc/ScopeLock.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogACEMicCapture, Log, All);
+
+static constexpr int32 MIN_AUDIO_SAMPLES = 8000; // minimum samples to send to ASR
 
 UMicCaptureComponent::UMicCaptureComponent()
 {
@@ -19,7 +22,6 @@ UMicCaptureComponent::UMicCaptureComponent()
 void UMicCaptureComponent::BeginPlay()
 {
     Super::BeginPlay();
-
     InitializeVoiceCapture();
 }
 
@@ -56,7 +58,8 @@ void UMicCaptureComponent::InitializeVoiceCapture()
         return;
     }
 
-    FVoiceModule* VoiceModulePtr = FModuleManager::GetModulePtr<FVoiceModule>(TEXT("Voice"));
+    FVoiceModule* VoiceModulePtr =
+        FModuleManager::GetModulePtr<FVoiceModule>(TEXT("Voice"));
     if (!VoiceModulePtr)
     {
         UE_LOG(LogACEMicCapture, Error,
@@ -67,18 +70,31 @@ void UMicCaptureComponent::InitializeVoiceCapture()
 
     FVoiceModule& VoiceModule = *VoiceModulePtr;
 
+    // Empty device name = use default device
     const FString DeviceName;
-    VoiceCapture = VoiceModule.CreateVoiceCapture(DeviceName, SampleRateHz, NumChannels);
+
+    // Use whatever you configured (defaults: 16000 Hz, 1 channel).
+    const int32 DesiredSampleRate = (SampleRateHz > 0) ? SampleRateHz : 16000;
+    const int32 DesiredChannels = (NumChannels > 0) ? NumChannels : 1;
+
+    VoiceCapture = VoiceModule.CreateVoiceCapture(
+        DeviceName,
+        DesiredSampleRate,
+        DesiredChannels);
+
     if (!VoiceCapture.IsValid())
     {
         UE_LOG(LogACEMicCapture, Error,
             TEXT("Failed to create voice capture interface (Device=\"%s\", SR=%d, Ch=%d)."),
-            *DeviceName, SampleRateHz, NumChannels);
+            *DeviceName, DesiredSampleRate, DesiredChannels);
         return;
     }
 
+    SampleRateHz = DesiredSampleRate;
+    NumChannels = DesiredChannels;
+
     UE_LOG(LogACEMicCapture, Log,
-        TEXT("MicCapture: Initialized voice capture (Device=\"%s\", SampleRate=%d, Channels=%d)."),
+        TEXT("MicCapture: Created voice capture (Device=\"%s\", SR=%d, Ch=%d)"),
         *DeviceName, SampleRateHz, NumChannels);
 }
 
@@ -101,8 +117,10 @@ void UMicCaptureComponent::StartCapture()
         return;
     }
 
-    // Clear any previous recording.
-    CapturedAudio.Reset();
+    {
+        FScopeLock Lock(&CaptureMutex);
+        CapturedAudio.Reset();
+    }
     VoiceCaptureBuffer.Reset();
 
     if (!VoiceCapture->Start())
@@ -112,7 +130,10 @@ void UMicCaptureComponent::StartCapture()
     }
 
     bIsCapturing = true;
-    UE_LOG(LogACEMicCapture, Log, TEXT("Microphone capture started."));
+
+    UE_LOG(LogACEMicCapture, Log,
+        TEXT("Microphone capture started (SR=%d, Ch=%d)."),
+        SampleRateHz, NumChannels);
 }
 
 void UMicCaptureComponent::StopCapture()
@@ -128,15 +149,33 @@ void UMicCaptureComponent::StopCapture()
         return;
     }
 
+    // Pull any remaining buffered samples
+    PollVoiceData();
+
     VoiceCapture->Stop();
     bIsCapturing = false;
 
-    UE_LOG(LogACEMicCapture, Log, TEXT("Microphone capture stopped."));
+    UE_LOG(LogACEMicCapture, Log,
+        TEXT("Microphone capture stopped. Total Samples: %d"),
+        CapturedAudio.Num());
 }
 
 void UMicCaptureComponent::GetCapturedAudio(TArray<float>& OutPCMFloat) const
 {
+    FScopeLock Lock(&CaptureMutex);
+
     OutPCMFloat = CapturedAudio;
+
+    // Ensure a minimum length by padding with silence (0.0f) if needed.
+    if (OutPCMFloat.Num() < MIN_AUDIO_SAMPLES)
+    {
+        const int32 SamplesNeeded = MIN_AUDIO_SAMPLES - OutPCMFloat.Num();
+        UE_LOG(LogACEMicCapture, Warning,
+            TEXT("GetCapturedAudio: Audio too short (%d samples). Padding with %d samples of silence."),
+            OutPCMFloat.Num(), SamplesNeeded);
+
+        OutPCMFloat.AddZeroed(SamplesNeeded);
+    }
 }
 
 void UMicCaptureComponent::PollVoiceData()
@@ -147,69 +186,66 @@ void UMicCaptureComponent::PollVoiceData()
     }
 
     uint32 BytesAvailable = 0;
-    EVoiceCaptureState::Type CaptureState = VoiceCapture->GetCaptureState(BytesAvailable);
+    const EVoiceCaptureState::Type CaptureState =
+        VoiceCapture->GetCaptureState(BytesAvailable);
 
-    if (CaptureState == EVoiceCaptureState::Ok && BytesAvailable > 0)
+    if (CaptureState != EVoiceCaptureState::Ok || BytesAvailable == 0)
     {
-        VoiceCaptureBuffer.SetNumUninitialized(BytesAvailable);
-
-        uint32 BytesWritten = 0;
-        const EVoiceCaptureState::Type GetState =
-            VoiceCapture->GetVoiceData(VoiceCaptureBuffer.GetData(), BytesAvailable, BytesWritten);
-
-        if (GetState == EVoiceCaptureState::Ok && BytesWritten > 0)
-        {
-            const int32 NumSamplesTotal = static_cast<int32>(BytesWritten / sizeof(int16));
-            const int32 NumFrames = (NumChannels > 0) ? (NumSamplesTotal / NumChannels) : NumSamplesTotal;
-
-            const int16* SampleData = reinterpret_cast<const int16*>(VoiceCaptureBuffer.GetData());
-
-            const int32 OldNum = CapturedAudio.Num();
-            CapturedAudio.Reserve(OldNum + NumFrames);
-
-            for (int32 FrameIdx = 0; FrameIdx < NumFrames; ++FrameIdx)
-            {
-                int64 Sum = 0;
-                for (int32 Ch = 0; Ch < NumChannels; ++Ch)
-                {
-                    const int32 SampleIndex = FrameIdx * NumChannels + Ch;
-                    if (SampleIndex < NumSamplesTotal)
-                    {
-                        Sum += SampleData[SampleIndex];
-                    }
-                }
-
-                const int32 AvgSample = (NumChannels > 0)
-                    ? static_cast<int32>(Sum / NumChannels)
-                    : 0;
-
-                const int32 Clamped = FMath::Clamp(
-                    AvgSample,
-                    static_cast<int32>(MIN_int16),
-                    static_cast<int32>(MAX_int16));
-
-                const float Normalized = static_cast<float>(Clamped) / 32768.0f;
-
-                CapturedAudio.Add(Normalized);
-            }
-
-            UE_LOG(LogACEMicCapture, Verbose,
-                TEXT("PollVoiceData: Bytes=%u, Written=%u, Frames=%d, TotalSamples=%d"),
-                BytesAvailable, BytesWritten, NumFrames, CapturedAudio.Num());
-        }
-        else if (GetState == EVoiceCaptureState::BufferTooSmall)
-        {
-            UE_LOG(LogACEMicCapture, Warning,
-                TEXT("PollVoiceData: Buffer too small. BytesAvailable=%u"),
-                BytesAvailable);
-        }
+        return;
     }
-    else if (CaptureState == EVoiceCaptureState::NoData)
+
+    VoiceCaptureBuffer.SetNumUninitialized(BytesAvailable);
+
+    uint32 BytesWritten = 0;
+    const EVoiceCaptureState::Type GetState =
+        VoiceCapture->GetVoiceData(
+            VoiceCaptureBuffer.GetData(),
+            BytesAvailable,
+            BytesWritten);
+
+    if (GetState != EVoiceCaptureState::Ok || BytesWritten == 0)
     {
-        // Nothing yet; normal.
+        return;
     }
-    else
+
+    // Interpret as 16-bit signed PCM (interleaved if multi-channel).
+    const int32 NumSamples = static_cast<int32>(BytesWritten / sizeof(int16));
+    const int16* SampleData =
+        reinterpret_cast<const int16*>(VoiceCaptureBuffer.GetData());
+
+    if (NumSamples <= 0 || SampleData == nullptr)
     {
-        // NotCapturing or other states – no-op.
+        return;
     }
+
+    FScopeLock Lock(&CaptureMutex);
+
+    const int32 OldNum = CapturedAudio.Num();
+    CapturedAudio.Reserve(OldNum + NumSamples);
+
+    for (int32 SampleIdx = 0; SampleIdx < NumSamples; ++SampleIdx)
+    {
+        // Normalize from int16 [-32768,32767] to float [-1,1]
+        const float Normalized =
+            static_cast<float>(SampleData[SampleIdx]) / 32768.0f;
+        CapturedAudio.Add(Normalized);
+    }
+
+    // Optional debug: uncomment to see amplitude statistics per chunk
+    
+    int16 MinSample = INT16_MAX;
+    int16 MaxSample = INT16_MIN;
+    int64 SumAbs = 0;
+    for (int32 i = 0; i < NumSamples; ++i)
+    {
+        int16 S = SampleData[i];
+        MinSample = FMath::Min(MinSample, S);
+        MaxSample = FMath::Max(MaxSample, S);
+        SumAbs += FMath::Abs((int32)S);
+    }
+    const float MeanAbs = float(SumAbs) / FMath::Max(NumSamples, 1);
+    UE_LOG(LogACEMicCapture, Verbose,
+        TEXT("PollVoiceData: +%d samples, Min=%d, Max=%d, MeanAbs=%.1f"),
+        NumSamples, (int32)MinSample, (int32)MaxSample, MeanAbs);
+    
 }
