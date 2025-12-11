@@ -120,33 +120,11 @@ void FIGIModule::StartupModule()
     Pimpl->StartupModule();
     UE_LOG(LogIGISDK, Log, TEXT("IGI module started"));
 
-    //if (LoadIGICore())
+    //FIGIGPT* GPT = Pimpl->GetGPT(this);
+    //if (GPT)
     //{
-    //    if (FIGIGPT* GPT = GetGPT())
-    //    {
-    //        // Default behavior: single-shot Python client per request.
-    //        // If you want to hide the cost of the very first NIM/LLM inference,
-    //        // you can optionally pre-warm on a background thread by uncommenting
-    //        // the block below.
-    //        //
-    //        //UE_LOG(LogIGISDK, Log, TEXT("[IGI] Queuing one-time Python warm-up on background thread..."));
-    //        //AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [GPT]()
-    //        //{
-    //        //    GPT->WarmUpPython(/*TimeoutSec=*/30.0);
-    //        //    UE_LOG(LogIGISDK, Log, TEXT("[IGI] Warm-up completed."));
-    //        //});
-    //        //
-    //        // NOTE:
-    //        // The persistent (--serve-stdin) Python client is available via
-    //        // FIGIGPT::StartPersistentPython, but is not started automatically
-    //        // here so the default path stays simpler and fully single-shot.
-
-    //        UE_LOG(LogIGISDK, Log, TEXT("IGI: GPT Subsystem Initialized."));
-    //    }
-    //    if (FIGIASR* ASR = GetASR())
-    //    {
-    //        UE_LOG(LogIGISDK, Log, TEXT("IGI: ASR Subsystem Initialized."));
-    //    }
+    //    GPT->StartPersistentPython(/*TimeoutSec=*/30.0);
+    //    GPT->WarmUpPython(/*TimeoutSec=*/30.0);
     //}
 }
 

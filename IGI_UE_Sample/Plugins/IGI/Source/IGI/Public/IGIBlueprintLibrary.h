@@ -23,9 +23,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Async)", BlueprintInternalUseOnly = "true"))
     static UIGIGPTEvaluateAsync* GPTEvaluateAsync(const FString& UserPrompt);
 
-    UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Structured, Async)", BlueprintInternalUseOnly = "true"))
-    static UIGIGPTEvaluateAsync* GPTEvaluateStructuredAsync(const FString& UserPrompt);
-
     UFUNCTION(BlueprintCallable, Category = "IGI|GPT", meta = (DisplayName = "Send text to GPT (Structured + Grammar)", BlueprintInternalUseOnly = "true"))
     static UIGIGPTEvaluateAsync* GPTEvaluateStructuredWithGrammarAsync(const FString& UserJSON, const FString& GrammarPath);
 
@@ -46,7 +43,6 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "IGI|GPT", meta = (BBlueprintInternalUseOnly = "true"))
     FString SchemaJSON;
 
-    UPROPERTY() bool bUseGrammar = false;
     UPROPERTY() FString UserPayload;
     UPROPERTY() FString GrammarFile;
 

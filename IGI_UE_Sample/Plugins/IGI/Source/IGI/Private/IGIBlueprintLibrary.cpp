@@ -32,20 +32,6 @@ UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateAsync(const FString& User
     return BlueprintNode;
 }
 
-UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateStructuredAsync(const FString& UserPrompt)
-{
-    if (IsRunning)
-    {
-        UE_LOG(LogIGISDK, Log, TEXT("%s: GPT is already running! Request was ignored."), ANSI_TO_TCHAR(__FUNCTION__));
-        return nullptr;
-    }
-
-    UIGIGPTEvaluateAsync* Node = NewObject<UIGIGPTEvaluateAsync>();
-    Node->UserPrompt = UserPrompt;
-    Node->AddToRoot();
-    return Node;
-}
-
 UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateStructuredWithGrammarAsync(const FString& UserJSON, const FString& GrammarPath)
 {
     if (IsRunning)
@@ -55,7 +41,6 @@ UIGIGPTEvaluateAsync* UIGIGPTEvaluateAsync::GPTEvaluateStructuredWithGrammarAsyn
     }
 
     UIGIGPTEvaluateAsync* Node = NewObject<UIGIGPTEvaluateAsync>();
-    Node->bUseGrammar = true;
     Node->UserPayload = UserJSON;
     Node->GrammarFile = GrammarPath;
     Node->AddToRoot();
@@ -72,6 +57,10 @@ void UIGIGPTEvaluateAsync::Activate()
     {
         UE_LOG(LogIGISDK, Log, TEXT("%s: GPT called with empty user prompt!"), ANSI_TO_TCHAR(__FUNCTION__));
     }
+    if (GrammarFile.IsEmpty())
+    {
+        UE_LOG(LogIGISDK, Log, TEXT("%s: GPT called with empty grammar file!"), ANSI_TO_TCHAR(__FUNCTION__));
+    }
     else
     {
         IsRunning = true;
@@ -85,10 +74,7 @@ void UIGIGPTEvaluateAsync::Activate()
             if (GPT != nullptr)
             {
                 //result = GPT->Evaluate(TrimmedUserPrompt);
-                if (bUseGrammar && !GrammarFile.IsEmpty())
-                    result = GPT->EvaluateStructuredWithGrammar(UserPayload, GrammarFile);
-                else
-                    result = GPT->EvaluateStructured(TrimmedUserPrompt);
+                result = GPT->EvaluateStructuredWithGrammar(UserPayload, GrammarFile);
 
                 AsyncTask(ENamedThreads::GameThread, [this, result]()
                     {

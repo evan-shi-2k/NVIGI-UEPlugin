@@ -401,13 +401,10 @@ static void IGI_RunASRSmokeTest()
 
     FIGIModule& IGIModule = FModuleManager::LoadModuleChecked<FIGIModule>("IGI");
 
-    // --- VARIABLES TO MANAGE RAW LIFECYCLE ---
     nvigi::IAutoSpeechRecognition* RawInterface = nullptr;
     nvigi::InferenceInstance* RawInstance = nullptr;
     nvigi::Result Result = nvigi::kResultOk;
 
-    // --- 1. LOAD INTERFACE ---
-    // NOTE: This will fail/crash if StartupModule has already called GetASR()!
     Result = IGIModule.LoadIGIFeature(nvigi::plugin::asr::ggml::cuda::kId, (nvigi::InferenceInterface**)&RawInterface, nullptr);
 
     if (Result != nvigi::kResultOk || !RawInterface)
@@ -416,11 +413,9 @@ static void IGI_RunASRSmokeTest()
         return;
     }
 
-    // --- 2. PREPARE CREATION PARAMETERS ---
     nvigi::ASRWhisperCreationParameters Params{};
     nvigi::CommonCreationParameters CommonParams{};
 
-    // Get Models Path
     auto ModelsUtf8 = StringCast<UTF8CHAR>(*IGIModule.GetModelsPath());
     CommonParams.utf8PathToModels = reinterpret_cast<const char*>(ModelsUtf8.Get());
     CommonParams.numThreads = 1;
@@ -429,7 +424,6 @@ static void IGI_RunASRSmokeTest()
 
     Params.chain(CommonParams);
 
-    // D3D12 Setup (Optional but good for checking GPU integration)
     nvigi::D3D12Parameters D3D12Params{};
     if (GDynamicRHI && GDynamicRHI->GetInterfaceType() == ERHIInterfaceType::D3D12)
     {
@@ -447,19 +441,16 @@ static void IGI_RunASRSmokeTest()
         }
     }
 
-    // --- 3. CREATE INSTANCE ---
     UE_LOG(LogIGISDK, Log, TEXT("Bareback Test: Creating Instance..."));
     Result = RawInterface->createInstance(Params, &RawInstance);
 
     if (Result != nvigi::kResultOk || !RawInstance)
     {
         UE_LOG(LogIGISDK, Error, TEXT("Bareback Test: Failed to create instance: %s"), *GetIGIStatusString(Result));
-        // Cleanup Interface
         IGIModule.UnloadIGIFeature(nvigi::plugin::asr::ggml::cuda::kId, RawInterface);
         return;
     }
 
-    // --- 4. PREPARE AUDIO (1 Sec Silence) ---
     std::vector<int16> AudioBuffer;
     AudioBuffer.resize(16000, 0); // 16kHz, 1 sec, silence
 
@@ -467,7 +458,6 @@ static void IGI_RunASRSmokeTest()
     nvigi::InferenceDataSlot AudioSlot{ nvigi::kASRWhisperDataSlotAudio, AudioData };
     nvigi::InferenceDataSlotArray Inputs{ 1, &AudioSlot };
 
-    // --- 5. DEFINE CALLBACK ---
     struct FTestContext { FString ResultText; };
     FTestContext MyContext;
 
@@ -492,11 +482,9 @@ static void IGI_RunASRSmokeTest()
     ExecCtx.callback = MyCallback;
     ExecCtx.callbackUserData = &MyContext;
 
-    // Default runtime params
     nvigi::ASRWhisperRuntimeParameters RuntimeParams{};
     ExecCtx.runtimeParameters = RuntimeParams;
 
-    // --- 6. EVALUATE ---
     UE_LOG(LogIGISDK, Log, TEXT("Bareback Test: Evaluating..."));
     Result = RawInstance->evaluate(&ExecCtx);
 
@@ -509,7 +497,6 @@ static void IGI_RunASRSmokeTest()
         UE_LOG(LogIGISDK, Error, TEXT("Bareback Test FAILED. Result: %s"), *GetIGIStatusString(Result));
     }
 
-    // --- 7. CLEANUP ---
     UE_LOG(LogIGISDK, Log, TEXT("Bareback Test: Cleaning up..."));
     if (RawInstance)
     {

@@ -48,7 +48,7 @@ namespace
     constexpr std::size_t CONTEXT_SIZE_RECOMMENDATION{ 4096 };
 
     static constexpr double kRequestTimeoutSeconds = 30.0;
-    static constexpr double kStartupTimeoutSeconds = 10.0;
+    static constexpr double kStartupTimeoutSeconds = 30.0;
     static constexpr double kReadPollIntervalSeconds = 0.01;
 }
 
@@ -357,7 +357,6 @@ private:
         return ProcHandle.IsValid() && FPlatformProcess::IsProcRunning(ProcHandle);
     }
 
-    // TODO Cleanup
     void ClosePipes()
     {
         if (StdOutReadHandle) { FPlatformProcess::ClosePipe(StdOutReadHandle, nullptr); StdOutReadHandle = nullptr; }
@@ -418,7 +417,7 @@ public:
     Impl(FIGIModule* IGIModule)
         : IGIModulePtr(IGIModule)
     {
-        /*nvigi::Result Result = nvigi::kResultOk;
+        nvigi::Result Result = nvigi::kResultOk;
 
         IGIModulePtr->LoadIGIFeature(nvigi::plugin::gpt::ggml::cuda::kId, &GPTInterface, nullptr);
 
@@ -483,7 +482,7 @@ public:
         {
             UE_LOG(LogIGISDK, Fatal, TEXT("[GPT] Unable to create gpt.ggml.cuda instance: %s"), *GetIGIStatusString(Result));
             GPTInstance = nullptr;
-        }*/
+        }
 
         PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
         PythonClient->ConfigureFromEnv();
@@ -493,7 +492,7 @@ public:
     {
         PythonClient.Reset();
 
-        /*if (GPTInstance != nullptr)
+        if (GPTInstance != nullptr)
         {
             GPTInterface->destroyInstance(GPTInstance);
             GPTInstance = nullptr;
@@ -503,7 +502,7 @@ public:
         {
             IGIModulePtr->UnloadIGIFeature(nvigi::plugin::gpt::ggml::cuda::kId, GPTInterface);
             IGIModulePtr = nullptr;
-        }*/
+        }
     }
 
     void WarmUpPython(double TimeoutSec)
@@ -576,8 +575,6 @@ public:
                 return state;
             };
 
-        // TODO: Read system/assistant prompt from disk
-
         auto UserPromptUTF = StringCast<UTF8CHAR>(*UserPrompt);
         nvigi::InferenceDataTextSTLHelper UserPromptData(reinterpret_cast<const char*>(UserPromptUTF.Get()));
 
@@ -629,28 +626,6 @@ public:
     {
         if (PythonPersistent.IsValid())
             PythonPersistent->Stop();
-    }
-
-    FString EvaluateStructured(const FString& UserPrompt)
-    {
-        if (PythonPersistent.IsValid() && PythonPersistent->IsRunning())
-        {
-            const FString Req = FString::Printf(TEXT("{\"user\":%s}"), *Quote(UserPrompt));
-            const FString Resp = PythonPersistent->RequestJSON(Req, /*TimeoutSec*/ 30.0);
-            if (!Resp.StartsWith(TEXT("{\"error\"")))
-                return Resp;
-            // fall through to single-shot if persistent errored
-            UE_LOG(LogIGISDK, Warning, TEXT("[persist] error, falling back: %s"), *Resp);
-        }
-
-        if (!PythonClient.IsValid())
-        {
-            PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
-            PythonClient->ConfigureFromEnv();
-        }
-
-        const FString Req = FString::Printf(TEXT("{\"user\":%s}"), *Quote(UserPrompt));
-        return PythonClient->RequestSingleShotJSON(Req, /*GrammarPath*/TEXT(""), /*TimeoutSec*/ 30.0);
     }
 
     FString EvaluateStructuredWithGrammar(const FString& UserPrompt, const FString& GrammarPath)
@@ -707,11 +682,6 @@ void FIGIGPT::StartPersistentPython(double TimeoutSec)
 void FIGIGPT::StopPersistentPython() 
 {
     Pimpl->StopPersistentPython(); 
-}
-
-FString FIGIGPT::EvaluateStructured(const FString& UserPrompt)
-{
-    return Pimpl->EvaluateStructured(UserPrompt);
 }
 
 FString FIGIGPT::EvaluateStructuredWithGrammar(const FString& UserPrompt, const FString& GrammarPath)

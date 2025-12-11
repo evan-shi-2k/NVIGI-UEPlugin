@@ -90,8 +90,6 @@ void UCommandRouterComponent::RouteFromText(const FString& UserDirective, AActor
 
     const FString Packed = BuildToolChooserUserJSON(UserDirective, ConsoleCands);
 
-    //UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateAsync(UserDirective);
-    //UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredAsync(UserDirective);
     UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredWithGrammarAsync(Packed, GrammarPath);
     if (!Node)
     {

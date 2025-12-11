@@ -22,8 +22,6 @@ public:
     void StartPersistentPython(double TimeoutSec = 30.0);
     void StopPersistentPython();
 
-    FString EvaluateStructured(const FString& UserPrompt);
-
     FString EvaluateStructuredWithGrammar(const FString& UserPrompt, const FString& GrammarPath);
 
 private:
