@@ -12,22 +12,54 @@ Protocol for --serve-stdin:
 - Optional overrides: "system", "assistant"
 - Control: {"__cmd":"ping"} -> {"ok":true,"pong":true}
 - Quit: {"__cmd":"quit"} or EOF
-- Respond with a single-line JSON string (no trailing logs), then flush.
+- Respond with a single-line JSON string (no trailing logs), newline-delimited, then flush.
 """
 
 import sys, os, json, argparse, traceback
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # NOTE: We rely on the OpenAI Python SDK that supports xgrammar via extra_body.
 try:
     from openai import OpenAI
-except Exception as e:
+except Exception:
     sys.stderr.write("FATAL: openai package not found. Install with `pip install openai`.\n")
     raise
 
 DEFAULT_BASE_URL = os.environ.get("NIM_BASE_URL", "http://127.0.0.1:8000/v1")
 DEFAULT_MODEL    = os.environ.get("NIM_MODEL_NAME", "meta/llama-3.2-3b-instruct")
 DEFAULT_API_KEY  = os.environ.get("NIM_API_KEY", "not-used")
+
+def configure_stdio():
+    """
+    Make stdout newline-framed + reliably flushed.
+    - Python is launched with -u on your side already, but we also:
+      * set UTF-8 where available
+      * enable line buffering where available
+    """
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+
+def send_json(obj: Any):
+    """
+    The ONLY function that writes to stdout.
+    Always emits exactly one JSON line terminated by \\n, then flushes.
+    """
+    try:
+        line = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    except Exception as e:
+        line = json.dumps({"error": "json_dumps_failed", "detail": str(e)}, separators=(",", ":"))
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
 
 def read_text(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -65,6 +97,9 @@ class StructuredClient:
         self.system_text = read_text(system_path)
         self.assistant_text = read_text(assistant_path)
 
+        self._grammar_cache: Dict[str, Tuple[float, str]] = {}
+        self._schema_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
         if mode == "grammar":
             self.grammar = read_text(grammar_path)
             if not self.grammar:
@@ -91,8 +126,56 @@ class StructuredClient:
         msgs.append({"role": "user", "content": user})
         return msgs
 
-    def infer(self, user: str, system_override: Optional[str] = None, assistant_override: Optional[str] = None) -> Any:
-        extra = {"guided_grammar": self.grammar} if self.mode == "grammar" else {"guided_json": self.schema}
+    def _get_grammar_from_path(self, path: str) -> str:
+        """Load grammar from disk with a tiny mtime cache."""
+        st = os.stat(path)
+        mtime = float(st.st_mtime)
+        cached = self._grammar_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        text = read_text(path)
+        if not text:
+            raise ValueError(f"grammar file empty or unreadable: {path}")
+        self._grammar_cache[path] = (mtime, text)
+        return text
+
+    def _get_schema_from_path(self, path: str) -> Dict[str, Any]:
+        """Load JSON schema from disk with a tiny mtime cache."""
+        st = os.stat(path)
+        mtime = float(st.st_mtime)
+        cached = self._schema_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        data = read_json(path)
+        if not data:
+            raise ValueError(f"json schema file empty or unreadable: {path}")
+        self._schema_cache[path] = (mtime, data)
+        return data
+
+    def infer(
+        self,
+        user: str,
+        system_override: Optional[str] = None,
+        assistant_override: Optional[str] = None,
+        grammar_path_override: Optional[str] = None,
+        grammar_text_override: Optional[str] = None,
+        json_schema_path_override: Optional[str] = None,
+        json_schema_override: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        if self.mode == "grammar":
+            g = self.grammar
+            if grammar_text_override is not None:
+                g = grammar_text_override
+            elif grammar_path_override:
+                g = self._get_grammar_from_path(grammar_path_override)
+            extra = {"guided_grammar": g}
+        else:
+            s = self.schema
+            if json_schema_override is not None:
+                s = json_schema_override
+            elif json_schema_path_override:
+                s = self._get_schema_from_path(json_schema_path_override)
+            extra = {"guided_json": s}
 
         kwargs = dict(
             model=self.model,
@@ -129,61 +212,73 @@ def parse_args(argv=None):
 def one_shot(sc: StructuredClient, user: str, system: Optional[str], assistant: Optional[str]) -> int:
     try:
         out = sc.infer(user, system_override=system, assistant_override=assistant)
-        sys.stdout.write(json.dumps(out, ensure_ascii=False, separators=(",", ":")) + "\n")
-        sys.stdout.flush()
+        send_json(out)
         return 0
     except Exception as e:
         sys.stderr.write("ERROR(one_shot): " + repr(e) + "\n")
         traceback.print_exc(file=sys.stderr)
-        sys.stdout.write(json.dumps({"error": "exception", "detail": str(e)}) + "\n")
-        sys.stdout.flush()
+        send_json({"error": "exception", "detail": str(e)})
         return 2
 
 def serve_stdin(sc: StructuredClient) -> int:
-    sys.stderr.write("[nim_structured] Entering --serve-stdin loop. Send {\"user\":\"...\"}\\n per request.\n")
-    for line in sys.stdin:
-        line = line.strip()
+    if os.getenv("NIM_STRUCTURED_BANNER", "0") == "1":
+        sys.stderr.write("[nim_structured] Entering --serve-stdin loop. Send {\"user\":\"...\"}\\n per request.\n")
+
+    for raw in sys.stdin:
+        line = raw.rstrip("\r\n")
         if not line:
             continue
+
         try:
             req = json.loads(line)
         except Exception:
-            sys.stdout.write(json.dumps({"error":"bad_request","detail":"invalid json line"}) + "\n")
-            sys.stdout.flush()
+            send_json({"error": "bad_request", "detail": "invalid json line"})
             continue
 
         if isinstance(req, dict) and "__cmd" in req:
             cmd = req["__cmd"]
             if cmd == "ping":
-                sys.stdout.write(json.dumps({"ok": True, "pong": True}) + "\n")
-                sys.stdout.flush()
+                send_json({"ok": True, "pong": True})
                 continue
             if cmd in ("quit", "exit", "stop"):
-                sys.stdout.write(json.dumps({"ok": True, "bye": True}) + "\n")
-                sys.stdout.flush()
+                send_json({"ok": True, "bye": True})
                 break
 
         try:
             if not isinstance(req, dict) or "user" not in req or not isinstance(req["user"], str):
-                sys.stdout.write(json.dumps({"error":"bad_request","detail":"missing 'user' string"}) + "\n")
-                sys.stdout.flush()
+                send_json({"error": "bad_request", "detail": "missing 'user' string"})
                 continue
 
             user = req["user"]
             sys_override = req.get("system")
             asst_override = req.get("assistant")
-            out = sc.infer(user, system_override=sys_override, assistant_override=asst_override)
-            sys.stdout.write(json.dumps(out, ensure_ascii=False, separators=(",", ":")) + "\n")
-            sys.stdout.flush()
+
+            grammar_path = req.get("grammar_path")
+            grammar_text = req.get("grammar")
+            schema_path = req.get("json_schema_path")
+            schema_obj = req.get("json_schema")
+
+            out = sc.infer(
+                user,
+                system_override=sys_override,
+                assistant_override=asst_override,
+                grammar_path_override=grammar_path,
+                grammar_text_override=grammar_text,
+                json_schema_path_override=schema_path,
+                json_schema_override=schema_obj,
+            )
+            send_json(out)
+
         except Exception as e:
             sys.stderr.write("ERROR(serve): " + repr(e) + "\n")
             traceback.print_exc(file=sys.stderr)
-            sys.stdout.write(json.dumps({"error":"exception","detail":str(e)}) + "\n")
-            sys.stdout.flush()
+            send_json({"error": "exception", "detail": str(e)})
+
     sys.stderr.write("[nim_structured] Exiting --serve-stdin.\n")
     return 0
 
 def main(argv=None) -> int:
+    configure_stdio()
     args = parse_args(argv)
 
     try:
@@ -204,14 +299,12 @@ def main(argv=None) -> int:
         return 2
 
     if args.serve_stdin:
-        pass
-
-    if args.serve_stdin:
         return serve_stdin(sc)
 
     if not args.user_prompt:
         sys.stderr.write("Single-shot mode requires --user '<prompt>'\n")
         return 2
+
     return one_shot(sc, args.user_prompt, None, None)
 
 if __name__ == "__main__":

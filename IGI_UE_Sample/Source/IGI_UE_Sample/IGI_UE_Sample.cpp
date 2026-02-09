@@ -16,7 +16,8 @@ class FIGIUESample : public FDefaultGameModuleImpl
         {
             UE_LOG(LogIGIUESample, Log, TEXT("IGI UE sample startup lambda started"));
 
-            FIGIModule* IGIModulePtr{ FModuleManager::GetModulePtr<FIGIModule>(FName("IGI")) };
+            //FIGIModule* IGIModulePtr{ FModuleManager::GetModulePtr<FIGIModule>(FName("IGI")) };
+            FIGIModule* IGIModulePtr = FModuleManager::LoadModulePtr<FIGIModule>("IGI");
             if (IGIModulePtr == nullptr)
             {
                 UE_LOG(LogIGIUESample, Error, TEXT("CANNOT FIND IGI MODULE"));

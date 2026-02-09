@@ -58,7 +58,9 @@ public class IGI : ModuleRules
                 "Engine",
                 "Projects",
 				"RHI",
-                "D3D12RHI"
+                "D3D12RHI",
+                "Json",
+                "JsonUtilities"
             }
 			);
 		

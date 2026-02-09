@@ -50,7 +50,9 @@ public:
 private:
     UPROPERTY() TWeakObjectPtr<AActor> PendingInstigator;
 
-    FString BuildToolChooserUserJSON(const FString& UserDirective, const TArray<struct FConsoleCandidate>& Cands) const;
+    FString BuildToolChooserUserJSON(const FString& UserText,
+        const TArray<FConsoleCandidate>& ConsoleCands,
+        const TArray<FWorldActionCandidate>& WorldCands) const;
 
     UFUNCTION()
     void HandleGPTResponse(FString Out);

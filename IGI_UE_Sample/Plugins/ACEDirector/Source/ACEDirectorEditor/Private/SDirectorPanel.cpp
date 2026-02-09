@@ -5,18 +5,77 @@
 #include "PropertyCustomizationHelpers.h"
 
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/SMultiLineEditableText.h"
 #include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Layout/SExpandableArea.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSpacer.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 
 #include "Modules/ModuleManager.h"
+#include "Async/Async.h"
 
 #include "CommandRouterComponent.h"
 #include "PlannerListener.h"
 #include "MicCaptureComponent.h"
 #include "IGIModule.h"
 #include "IGIASR.h"
+
+static FString TimeStamp()
+{
+    return FDateTime::Now().ToString(TEXT("%H:%M:%S"));
+}
+
+struct SDirectorPanel::FGPTLogCaptureDevice : public FOutputDevice
+{
+    TWeakPtr<SDirectorPanel> Owner;
+
+    virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category) override
+    {
+        if (!V)
+        {
+            return;
+        }
+
+        const TSharedPtr<SDirectorPanel> Pinned = Owner.Pin();
+        if (!Pinned.IsValid())
+        {
+            return;
+        }
+
+        const FString Msg(V);
+
+        if (!Pinned->IsLikelyGPTLog(Msg, Category))
+        {
+            return;
+        }
+
+        AsyncTask(ENamedThreads::GameThread, [WeakOwner = Owner, Category, Msg]()
+            {
+                if (const TSharedPtr<SDirectorPanel> Panel = WeakOwner.Pin())
+                {
+                    const FString Line = FString::Printf(TEXT("%s: %s"), *Category.ToString(), *Msg);
+                    Panel->AppendGPTDebug(Line);
+                }
+            });
+    }
+};
+
+SDirectorPanel::~SDirectorPanel()
+{
+    if (GPTLogCapture.IsValid() && GLog)
+    {
+        GLog->RemoveOutputDevice(GPTLogCapture.Get());
+    }
+
+    if (Listener)
+    {
+        Listener->RemoveFromRoot();
+        Listener = nullptr;
+    }
+}
 
 void SDirectorPanel::Construct(const FArguments& InArgs)
 {
@@ -38,6 +97,7 @@ void SDirectorPanel::Construct(const FArguments& InArgs)
         [
             SNew(SVerticalBox)
 
+                // Target Actor Selector
                 + SVerticalBox::Slot()
                 .AutoHeight()
                 .Padding(4)
@@ -49,7 +109,7 @@ void SDirectorPanel::Construct(const FArguments& InArgs)
                         .Padding(0, 0, 8, 0)
                         [
                             SNew(STextBlock)
-                                .Text(FText::FromString(TEXT("Target Actor (has CommandRouter + MicCapture):")))
+                                .Text(FText::FromString(TEXT("Target Actor:")))
                         ]
                         + SHorizontalBox::Slot()
                         .FillWidth(1.f)
@@ -65,46 +125,91 @@ void SDirectorPanel::Construct(const FArguments& InArgs)
                         ]
                 ]
 
+            // Input Area
             + SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(4)
+                .Padding(4, 4, 4, 0)
                 [
-                    SNew(SHorizontalBox)
+                    SNew(SVerticalBox)
 
-                        + SHorizontalBox::Slot()
-                        .FillWidth(1.f)
+                        + SVerticalBox::Slot()
+                        .AutoHeight()
                         [
-                            SAssignNew(PromptBox, SEditableTextBox)
-                                .HintText(FText::FromString(TEXT("Type or say a directive, e.g. 'MoveTo origin'")))
-                                .MinDesiredWidth(400.f)
+                            SNew(SBox)
+                                //.HeightOverride(100.0f)
+                                [
+                                    SNew(SScrollBox)
+                                        + SScrollBox::Slot()
+                                        [
+                                            SAssignNew(PromptBox, SMultiLineEditableTextBox)
+                                                .HintText(FText::FromString(TEXT("Type or say a directive...")))
+                                                .AutoWrapText(true)
+                                        ]
+                                ]
                         ]
 
-                        + SHorizontalBox::Slot()
-                        .AutoWidth()
-                        .Padding(8, 0, 0, 0)
+                    + SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(0, 4)
                         [
-                            SNew(SButton)
-                                .Text(FText::FromString(TEXT("Send")))
-                                .OnClicked(this, &SDirectorPanel::OnSendClicked)
-                        ]
+                            SNew(SHorizontalBox)
+                                + SHorizontalBox::Slot()
+                                .FillWidth(0.5f)
+                                [
+                                    SNew(SButton)
+                                        .HAlign(HAlign_Center)
+                                        .Text(FText::FromString(TEXT("Send")))
+                                        .OnClicked(this, &SDirectorPanel::OnSendClicked)
+                                ]
 
-                        + SHorizontalBox::Slot()
-                        .AutoWidth()
-                        .Padding(8, 0, 0, 0)
-                        [
-                            SAssignNew(PushToTalkButton, SButton)
-                                .Text(this, &SDirectorPanel::GetPushToTalkText)
-                                .OnClicked(this, &SDirectorPanel::OnPushToTalkClicked)
+                                + SHorizontalBox::Slot()
+                                .FillWidth(0.5f)
+                                .Padding(2, 0, 0, 0)
+                                [
+                                    SAssignNew(PushToTalkButton, SButton)
+                                        .HAlign(HAlign_Center)
+                                        .Text(this, &SDirectorPanel::GetPushToTalkText)
+                                        .OnClicked(this, &SDirectorPanel::OnPushToTalkClicked)
+                                ]
                         ]
                 ]
 
+            // Main output area
             + SVerticalBox::Slot()
                 .FillHeight(1.f)
                 .Padding(4)
                 [
-                    SAssignNew(LogBox, SMultiLineEditableText)
-                        .AutoWrapText(true)
-                        .IsReadOnly(true)
+                    SNew(SScrollBox)
+                        + SScrollBox::Slot()
+                        [
+                            SAssignNew(LogBox, SMultiLineEditableTextBox)
+                                .IsReadOnly(true)
+                                .AutoWrapText(true)
+                        ]
+                ]
+
+            // GPT Debug
+            + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(4)
+                [
+                    SNew(SExpandableArea)
+                        .InitiallyCollapsed(true)
+                        .AreaTitle(FText::FromString(TEXT("GPT Debug")))
+                        .BodyContent()
+                        [
+                            SNew(SBox)
+                                .MaxDesiredHeight(250.0f)
+                                [
+                                    SNew(SScrollBox)
+                                        + SScrollBox::Slot()
+                                        [
+                                            SAssignNew(DebugBox, SMultiLineEditableTextBox)
+                                                .IsReadOnly(true)
+                                                .AutoWrapText(true)
+                                        ]
+                                ]
+                        ]
                 ]
         ];
 
@@ -115,20 +220,70 @@ void SDirectorPanel::Construct(const FArguments& InArgs)
         Listener->Init(Router);
         Listener->OnPlannerTextNative.AddRaw(this, &SDirectorPanel::AppendLog);
     }
+
+    GPTLogCapture = MakeShared<FGPTLogCaptureDevice>();
+    GPTLogCapture->Owner = SharedThis(this);
+    if (GLog)
+    {
+        GLog->AddOutputDevice(GPTLogCapture.Get());
+    }
 }
 
-static FString TimeStamp()
+bool SDirectorPanel::IsLikelyGPTLog(const FString& Msg, const FName& Category) const
 {
-    return FDateTime::Now().ToString(TEXT("HH:mm:ss"));
+    if (Msg.Contains(TEXT("sending to GPT"), ESearchCase::IgnoreCase)) return true;
+    if (Msg.Contains(TEXT("response from GPT"), ESearchCase::IgnoreCase)) return true;
+    if (Msg.Contains(TEXT("GPTEvaluate"), ESearchCase::IgnoreCase)) return true;
+    if (Msg.Contains(TEXT("Failed to parse plan JSON"), ESearchCase::IgnoreCase)) return true;
+    if (Msg.Contains(TEXT("[persist]"), ESearchCase::IgnoreCase)) return true;
+    if (Msg.Contains(TEXT("[nim_structured]"), ESearchCase::IgnoreCase)) return true;
+
+    const FString Cat = Category.ToString();
+    if (Cat.Contains(TEXT("LogIGISDK"))) return true;
+    if (Cat.Contains(TEXT("LogACEPlanner"))) return true;
+    if (Cat.Contains(TEXT("LogInteractiveProcess"))) return true;
+
+    return false;
 }
 
 void SDirectorPanel::AppendLog(const FString& Line)
 {
+    const FString Msg = FString::Printf(TEXT("[%s] %s\n"), *TimeStamp(), *Line);
+    LogBuffer += Msg;
+
     if (LogBox.IsValid())
     {
-        const FString Msg = FString::Printf(TEXT("[%s] %s\n"), *TimeStamp(), *Line);
-        LogBox->InsertTextAtCursor(FText::FromString(Msg));
+        LogBox->SetText(FText::FromString(LogBuffer));
     }
+}
+
+void SDirectorPanel::AppendGPTDebug(const FString& Line)
+{
+    const FString Msg = FString::Printf(TEXT("[%s] %s\n"), *TimeStamp(), *Line);
+    DebugBuffer += Msg;
+
+    if (DebugBox.IsValid())
+    {
+        DebugBox->SetText(FText::FromString(DebugBuffer));
+    }
+}
+
+AActor* SDirectorPanel::ResolveRuntimeActor() const
+{
+    AActor* A = TargetActor.Get();
+    if (!A) return nullptr;
+
+#if WITH_EDITOR
+    if (GEditor && GEditor->PlayWorld)
+    {
+        if (AActor* PIE = EditorUtilities::GetSimWorldCounterpartActor(A))
+        {
+            return PIE;
+        }
+    }
+#endif
+
+    return A;
 }
 
 FReply SDirectorPanel::OnSendClicked()
@@ -145,21 +300,29 @@ FReply SDirectorPanel::OnSendClicked()
         return FReply::Handled();
     }
 
-    AActor* Target = TargetActor.Get();
-    if (!Target)
+#if WITH_EDITOR
+    if (!GEditor || !GEditor->PlayWorld)
+    {
+        AppendLog(TEXT("Start PIE / Simulate first (router needs a GameInstance)."));
+        return FReply::Handled();
+    }
+#endif
+
+    AActor* RuntimeTarget = ResolveRuntimeActor();
+    if (!RuntimeTarget)
     {
         AppendLog(TEXT("Pick a target actor first."));
         return FReply::Handled();
     }
 
-    UCommandRouterComponent* Router = GetRouter();
+    UCommandRouterComponent* Router = RuntimeTarget->FindComponentByClass<UCommandRouterComponent>();
     if (!Router)
     {
-        AppendLog(TEXT("Target actor has no CommandRouterComponent."));
+        AppendLog(TEXT("Target actor has no CommandRouterComponent (in PIE world)."));
         return FReply::Handled();
     }
 
-    Router->RouteFromText(Prompt, Target);
+    Router->RouteFromText(Prompt, RuntimeTarget);
     AppendLog(FString::Printf(TEXT(">> %s"), *Prompt));
     return FReply::Handled();
 }
@@ -182,14 +345,12 @@ FReply SDirectorPanel::OnPushToTalkClicked()
 
     if (!bIsRecording)
     {
-        // Start recording
         Mic->StartCapture();
         bIsRecording = true;
         AppendLog(TEXT("[ASR] Recording started..."));
     }
     else
     {
-        // Stop recording and run ASR
         Mic->StopCapture();
         bIsRecording = false;
         AppendLog(TEXT("[ASR] Recording stopped. Running transcription..."));
@@ -203,7 +364,6 @@ FReply SDirectorPanel::OnPushToTalkClicked()
             return FReply::Handled();
         }
 
-        // Call IGI ASR synchronously
         FIGIASR* ASR = nullptr;
         {
             if (FModuleManager::Get().IsModuleLoaded(TEXT("IGI")))
@@ -228,8 +388,7 @@ FReply SDirectorPanel::OnPushToTalkClicked()
         const int32 NumChannels = 1;
         const bool bIsFinal = true;
 
-        const FString Transcript =
-            ASR->TranscribePCMFloat(Audio, SampleRateHz, NumChannels, bIsFinal);
+        const FString Transcript = ASR->TranscribePCMFloat(Audio, SampleRateHz, NumChannels, bIsFinal);
 
         if (Transcript.IsEmpty())
         {
@@ -256,19 +415,9 @@ FText SDirectorPanel::GetPushToTalkText() const
         : FText::FromString(TEXT("Push to Talk"));
 }
 
-UWorld* SDirectorPanel::GetCurrentWorld() const
-{
-    if (GEditor)
-    {
-        const FWorldContext* Ctx = &GEditor->GetEditorWorldContext();
-        return Ctx ? Ctx->World() : nullptr;
-    }
-    return nullptr;
-}
-
 UCommandRouterComponent* SDirectorPanel::GetRouter() const
 {
-    if (AActor* A = TargetActor.Get())
+    if (AActor* A = ResolveRuntimeActor())
     {
         return A->FindComponentByClass<UCommandRouterComponent>();
     }
@@ -277,7 +426,7 @@ UCommandRouterComponent* SDirectorPanel::GetRouter() const
 
 UMicCaptureComponent* SDirectorPanel::GetMicComponent() const
 {
-    if (AActor* A = TargetActor.Get())
+    if (AActor* A = ResolveRuntimeActor())
     {
         return A->FindComponentByClass<UMicCaptureComponent>();
     }

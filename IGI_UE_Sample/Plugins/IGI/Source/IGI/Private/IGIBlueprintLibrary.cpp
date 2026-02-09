@@ -70,19 +70,31 @@ void UIGIGPTEvaluateAsync::Activate()
         AsyncTask(ENamedThreads::AnyBackgroundHiPriTask, [this, TrimmedSystemPrompt, TrimmedUserPrompt, TrimmedAssistantPrompt]()
         {
             FString result;
-            FIGIGPT* GPT{ FModuleManager::GetModuleChecked<FIGIModule>(FName("IGI")).GetGPT()};
-            if (GPT != nullptr)
+            FIGIGPT* GPT = nullptr;
+            if (FIGIModule* Mod = FModuleManager::GetModulePtr<FIGIModule>("IGI"))
             {
-                //result = GPT->Evaluate(TrimmedUserPrompt);
-                result = GPT->EvaluateStructuredWithGrammar(UserPayload, GrammarFile);
-
-                AsyncTask(ENamedThreads::GameThread, [this, result]()
-                    {
-                        OnResponse.Broadcast(result);
-                    });
-
-                UE_LOG(LogIGISDK, Log, TEXT("%s: response from GPT: %s"), ANSI_TO_TCHAR(__FUNCTION__), *result);
+                GPT = Mod->GetGPT();
             }
+
+            if (!GPT)
+            {
+                AsyncTask(ENamedThreads::GameThread, [this]()
+                    {
+                        OnResponse.Broadcast(TEXT("[IGI] GPT not ready yet (initializing). Try again in a moment."));
+                    });
+                IsRunning = false;
+                return;
+            }
+
+            //result = GPT->Evaluate(TrimmedUserPrompt);
+            result = GPT->EvaluateStructuredWithGrammar(UserPayload, GrammarFile);
+
+            AsyncTask(ENamedThreads::GameThread, [this, result]()
+                {
+                    OnResponse.Broadcast(result);
+                });
+
+            UE_LOG(LogIGISDK, Log, TEXT("%s: response from GPT: %s"), ANSI_TO_TCHAR(__FUNCTION__), *result);
 
             IsRunning = false;
             this->RemoveFromRoot();

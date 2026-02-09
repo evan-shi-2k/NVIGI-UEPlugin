@@ -4,8 +4,10 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Misc/DefaultValueHelper.h"
+#include "HAL/IConsoleManager.h"
 
 #include "Engine/World.h"
+#include "Engine/GameInstance.h"
 #include "Kismet/KismetStringLibrary.h"
 
 #include "IGIBlueprintLibrary.h"
@@ -13,6 +15,18 @@
 #include "ACEConsoleTool.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogACEPlanner, Log, All);
+
+static TAutoConsoleVariable<float> CVarACE_MinConsoleCandidateScore(
+    TEXT("ace.MinConsoleCandidateScore"),
+    0.10f,
+    TEXT("Console candidate must have Score >= this to be included in the per-query grammar."),
+    ECVF_Default);
+
+static TAutoConsoleVariable<float> CVarACE_MinWorldCandidateScore(
+    TEXT("ace.MinWorldCandidateScore"),
+    0.10f,
+    TEXT("World action candidate must have Score >= this to be included in the per-query grammar."),
+    ECVF_Default);
 
 static FString JsonValueToCompactString(const TSharedPtr<FJsonValue>& V)
 {
@@ -37,30 +51,36 @@ static FString JsonValueToCompactString(const TSharedPtr<FJsonValue>& V)
 
 FString UCommandRouterComponent::BuildToolChooserUserJSON(
     const FString& UserText,
-    const TArray<FConsoleCandidate>& Cands) const
+    const TArray<FConsoleCandidate>& ConsoleCands,
+    const TArray<FWorldActionCandidate>& WorldCands) const
 {
     FString Out(TEXT("{\"user\":\""));
     Out += UACEToolGrammarBuilder::JsonEscape(UserText);
+
     Out += TEXT("\",\"console_candidates\":[");
-    for (int32 i = 0; i < Cands.Num(); ++i) {
-        const auto& C = Cands[i];
+    for (int32 i = 0; i < ConsoleCands.Num(); ++i) {
+        const auto& C = ConsoleCands[i];
         Out += TEXT("{\"name\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Name) 
              + TEXT("\",\"argNames\":\"") + UACEToolGrammarBuilder::JsonEscape(C.ArgNames) 
-             + TEXT("\",\"doc\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Doc) 
-             + TEXT("\",\"aliases\":[");
-        for (int32 j = 0; j < C.Aliases.Num(); ++j) {
-            Out += TEXT("\"") + UACEToolGrammarBuilder::JsonEscape(C.Aliases[j]) + TEXT("\"");
-            if (j + 1 < C.Aliases.Num()) Out += TEXT(",");
-        }
-        Out += TEXT("],\"tags\":[");
-        for (int32 j = 0; j < C.Tags.Num(); ++j) {
-            Out += TEXT("\"") + UACEToolGrammarBuilder::JsonEscape(C.Tags[j]) + TEXT("\"");
-            if (j + 1 < C.Tags.Num()) Out += TEXT(",");
-        }
-        Out += FString::Printf(TEXT("],\"score\":%.3f,\"idx\":%d}"), C.Score, i);
-        if (i + 1 < Cands.Num()) Out += TEXT(",");
+             + TEXT("\",\"doc\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Doc);
+        Out += FString::Printf(TEXT("\",\"score\":%.3f}"), C.Score);
+        if (i + 1 < ConsoleCands.Num()) Out += TEXT(",");
+    }
+    Out += TEXT("]");
+
+    Out += TEXT(",\"world_candidates\":[");
+    for (int32 i = 0; i < WorldCands.Num(); ++i)
+    {
+        const auto& C = WorldCands[i];
+        Out += TEXT("{\"intent\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Intent)
+            + TEXT("\",\"doc\":\"") + UACEToolGrammarBuilder::JsonEscape(C.Doc)
+            + TEXT("\",\"schema\":") + (C.ArgsSchemaJson.IsEmpty() ? TEXT("null") : C.ArgsSchemaJson)
+            + TEXT(",\"examples\":") + (C.ExamplesJson.IsEmpty() ? TEXT("null") : C.ExamplesJson)
+            + FString::Printf(TEXT(",\"score\":%.3f}"), C.Score);
+        if (i + 1 < WorldCands.Num()) Out += TEXT(",");
     }
     Out += TEXT("]}");
+
     return Out;
 }
 
@@ -73,22 +93,44 @@ void UCommandRouterComponent::RouteFromText(const FString& UserDirective, AActor
 {
     PendingInstigator = Instigator;
 
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogACEPlanner, Warning, TEXT("RouteFromText: GetWorld() is null"));
+        return;
+    }
+
+    UGameInstance* GI = World->GetGameInstance();
+    if (!GI)
+    {
+        UE_LOG(LogACEPlanner, Warning,
+            TEXT("RouteFromText: GameInstance is null (WorldType=%d). This usually means you're calling from the Editor world; run PIE and target the PIE actor."),
+            (int32)World->WorldType);
+        return;
+    }
+
     // Retrieve top-K sets
     TArray<FConsoleCandidate> ConsoleCands;
     if (UACEConsoleCommandRegistry* RC = GetWorld()->GetGameInstance()->GetSubsystem<UACEConsoleCommandRegistry>())
-        RC->RetrieveTopK(UserDirective, /*K=*/5, ConsoleCands);
+        RC->RetrieveTopK(UserDirective, /*K=*/3, ConsoleCands);
 
     TArray<FWorldActionCandidate> WorldCands;
     if (UACEWorldActionRegistry* RW = GetWorld()->GetGameInstance()->GetSubsystem<UACEWorldActionRegistry>())
-        RW->RetrieveTopK(UserDirective, /*K=*/5, WorldCands);
+        RW->RetrieveTopK(UserDirective, /*K=*/3, WorldCands);
+
+    const float MinConsole = CVarACE_MinConsoleCandidateScore.GetValueOnGameThread();
+    const float MinWorld = CVarACE_MinWorldCandidateScore.GetValueOnGameThread();
+
+    ConsoleCands.RemoveAll([&](const FConsoleCandidate& C) { return C.Score < MinConsole; });
+    WorldCands.RemoveAll([&](const FWorldActionCandidate& C) { return C.Score < MinWorld; });
 
     TArray<FString> IntentNames;  for (auto& c : WorldCands)   IntentNames.Add(c.Intent);
     TArray<FString> ConsoleNames; for (auto& c : ConsoleCands) ConsoleNames.Add(c.Name);
 
     const FString Grammar = UACEToolGrammarBuilder::BuildPerQueryGrammar(IntentNames, ConsoleNames);
     const FString GrammarPath = UACEToolGrammarBuilder::WriteTempGrammarFile(Grammar);
-
-    const FString Packed = BuildToolChooserUserJSON(UserDirective, ConsoleCands);
+    const FString Packed = BuildToolChooserUserJSON(UserDirective, ConsoleCands, WorldCands);
+    UE_LOG(LogACEPlanner, Warning, TEXT("%s"), *Packed);
 
     UIGIGPTEvaluateAsync* Node = UIGIGPTEvaluateAsync::GPTEvaluateStructuredWithGrammarAsync(Packed, GrammarPath);
     if (!Node)
@@ -130,7 +172,6 @@ void UCommandRouterComponent::UnregisterAction(const FString& IntentName)
         });
 }
 
-// TODO: Refactor
 void UCommandRouterComponent::HandleGPTResponse(FString Out)
 {
     OnPlannerText.Broadcast(Out);
@@ -154,6 +195,19 @@ void UCommandRouterComponent::HandleGPTResponse(FString Out)
                     return;
                 }
             }
+
+            if (Tool.Equals(TEXT("world.act"), ESearchCase::IgnoreCase))
+            {
+                const TSharedPtr<FJsonObject>* ActObj = nullptr;
+                if (Root->TryGetObjectField(TEXT("act"), ActObj) && ActObj && ActObj->IsValid())
+                {
+                    FString Unwrapped;
+                    auto Writer = TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Unwrapped);
+                    FJsonSerializer::Serialize((*ActObj).ToSharedRef(), Writer);
+                    Writer->Close();
+                    Out = Unwrapped;
+                }
+            }
         }
     }
 
@@ -174,9 +228,10 @@ bool UCommandRouterComponent::TryParsePlan(const FString& JSON, FACECommandList&
     {
         return false;
     }
-    
+
     return OutPlan.commands.Num() > 0;
 }
+
 
 void UCommandRouterComponent::ExecutePlan(const FACECommandList& Plan, AActor* Instigator)
 {

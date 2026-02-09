@@ -6,11 +6,11 @@
 USTRUCT(BlueprintType)
 struct FConsoleCommandEntry {
     GENERATED_USTRUCT_BODY()
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Name;            // e.g. "t.MaxFPS"
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> Aliases; // e.g. ["max fps", "fps cap"]
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Doc;             // one-line doc
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> Tags;    // e.g. ["perf","render"]
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ArgNames;        // e.g. "<int>"
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Name;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> Aliases;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Doc;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> Tags;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ArgNames;
 };
 
 USTRUCT(BlueprintType)

@@ -6,11 +6,17 @@
 USTRUCT(BlueprintType)
 struct FWorldActionEntry {
     GENERATED_USTRUCT_BODY()
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Intent;   // e.g., "MoveTo"
+    // TODO: REMOVE
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Intent;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> Aliases;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Doc;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FString> Tags;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ArgHints; // e.g., "location, anim"
+
+    UPROPERTY() FString ArgsSchemaJson;
+    UPROPERTY() FString ArgsSummary;
+    UPROPERTY() FString ConstraintsSummary;
+    UPROPERTY() FString ExamplesJson;
+    UPROPERTY() FString ExamplesSummary;
 };
 
 USTRUCT(BlueprintType)
@@ -19,7 +25,9 @@ struct FWorldActionCandidate {
     UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Intent;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) float Score = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) FString Doc;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString ArgHints;
+
+    UPROPERTY() FString ArgsSchemaJson;
+    UPROPERTY() FString ExamplesJson;
 };
 
 UCLASS()

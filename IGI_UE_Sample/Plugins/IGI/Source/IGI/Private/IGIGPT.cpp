@@ -31,6 +31,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/ScopeLock.h"
 #include "Misc/MonitoredProcess.h"
+#include "Misc/InteractiveProcess.h"
 #include "Misc/DateTime.h"
 #include "Misc/Timespan.h"
 
@@ -61,17 +62,133 @@ static FString Quote(const FString& S)
 #endif
 }
 
+static int32 FindJsonEndIndex(const FString& S)
+{
+    bool bStarted = false;
+    bool bInString = false;
+    bool bEscape = false;
+    int32 ObjDepth = 0;
+    int32 ArrDepth = 0;
+
+    for (int32 i = 0; i < S.Len(); ++i)
+    {
+        const TCHAR c = S[i];
+
+        if (!bStarted)
+        {
+            if (c == '{') { bStarted = true; ObjDepth = 1; continue; }
+            if (c == '[') { bStarted = true; ArrDepth = 1; continue; }
+            continue; // skip any junk before JSON starts
+        }
+
+        if (bInString)
+        {
+            if (bEscape) { bEscape = false; continue; }
+            if (c == '\\') { bEscape = true; continue; }
+            if (c == '"') { bInString = false; continue; }
+            continue;
+        }
+
+        if (c == '"') { bInString = true; continue; }
+        if (c == '{') ++ObjDepth;
+        else if (c == '}') --ObjDepth;
+        else if (c == '[') ++ArrDepth;
+        else if (c == ']') --ArrDepth;
+
+        if (bStarted && ObjDepth == 0 && ArrDepth == 0)
+        {
+            return i; // inclusive
+        }
+    }
+
+    return INDEX_NONE;
+}
+
+static FString SanitizeForLog(const FString& In, int32 MaxLen = 512)
+{
+    FString Out;
+    Out.Reserve(FMath::Min(In.Len(), MaxLen));
+
+    for (int32 i = 0; i < In.Len() && Out.Len() < MaxLen; ++i)
+    {
+        const TCHAR C = In[i];
+
+        if (C == TEXT('\r') || C == TEXT('\n') || C == TEXT('\t'))
+        {
+            Out.AppendChar(TEXT(' '));
+            continue;
+        }
+
+        if (C >= 32 && C < 127)
+        {
+            Out.AppendChar(C);
+        }
+        else
+        {
+            Out.AppendChar(TEXT('?'));
+        }
+    }
+
+    if (In.Len() > MaxLen)
+    {
+        Out += TEXT("...");
+    }
+    return Out;
+}
+
+static bool ExtractJsonPayload(const FString& InLine, FString& OutJson)
+{
+    FString S = InLine;
+    S.ReplaceInline(TEXT("\r"), TEXT(""));
+    S.TrimStartAndEndInline();
+    if (S.IsEmpty())
+    {
+        return false;
+    }
+
+    const int32 ObjIdx = S.Find(TEXT("{"), ESearchCase::CaseSensitive);
+    const int32 ArrIdx = S.Find(TEXT("["), ESearchCase::CaseSensitive);
+    int32 StartIdx = INDEX_NONE;
+
+    if (ObjIdx != INDEX_NONE && (ArrIdx == INDEX_NONE || ObjIdx < ArrIdx))
+    {
+        StartIdx = ObjIdx;
+    }
+    else if (ArrIdx != INDEX_NONE)
+    {
+        StartIdx = ArrIdx;
+    }
+
+    if (StartIdx == INDEX_NONE)
+    {
+        return false;
+    }
+
+    S = S.Mid(StartIdx);
+
+    const int32 EndIdx = FindJsonEndIndex(S);
+    if (EndIdx == INDEX_NONE)
+    {
+        return false; // incomplete JSON (shouldn't happen for line-based protocol)
+    }
+
+    OutJson = S.Left(EndIdx + 1);
+    return true;
+}
+
+
 static FString DefaultPythonExe()
 {
 #if PLATFORM_WINDOWS
-    // <ProjectDir>/ACE/ace_env/Scripts/python.exe
-    return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_env"), TEXT("Scripts"), TEXT("python.exe"));
+    // <ProjectDir>/ACE/ace_venv/Scripts/python.exe
+    return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_venv"), TEXT("Scripts"), TEXT("python.exe"));
 #else
-    // <ProjectDir>/ACE/ace_env/bin/python3
-    return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_env"), TEXT("bin"), TEXT("python3"));
+    // <ProjectDir>/ACE/ace_venv/bin/python3
+    return FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("ace_venv"), TEXT("bin"), TEXT("python3"));
 #endif
 }
 
+// TODO: Remove
 class FPythonMonitoredSingleShot
 {
 public:
@@ -127,20 +244,20 @@ public:
         }
         if (Mode.Equals(TEXT("grammar"), ESearchCase::IgnoreCase))
         {
-            if (!GrammarPath.IsEmpty()) 
-            { 
-                Args.Add(TEXT("--grammar")); Args.Add(Quote(GrammarPath)); 
+            if (!GrammarPath.IsEmpty())
+            {
+                Args.Add(TEXT("--grammar")); Args.Add(Quote(GrammarPath));
             }
-            else if (!DefaultGrammarPath.IsEmpty()) 
-            { 
-                Args.Add(TEXT("--grammar")); Args.Add(Quote(DefaultGrammarPath)); 
+            else if (!DefaultGrammarPath.IsEmpty())
+            {
+                Args.Add(TEXT("--grammar")); Args.Add(Quote(DefaultGrammarPath));
             }
         }
         else
         {
-            if (!DefaultJsonSchemaPath.IsEmpty()) 
-            { 
-                Args.Add(TEXT("--json-schema")); Args.Add(Quote(DefaultJsonSchemaPath)); 
+            if (!DefaultJsonSchemaPath.IsEmpty())
+            {
+                Args.Add(TEXT("--json-schema")); Args.Add(Quote(DefaultJsonSchemaPath));
             }
         }
         Args.Add(TEXT("--user"));
@@ -213,8 +330,15 @@ private:
 class FPythonPersistentClient
 {
 public:
-    FPythonPersistentClient() { ConfigureFromEnv(); }
-    ~FPythonPersistentClient() { Stop(); }
+    FPythonPersistentClient()
+    {
+        ConfigureFromEnv();
+    }
+
+    ~FPythonPersistentClient()
+    {
+        Stop();
+    }
 
     void ConfigureFromEnv()
     {
@@ -226,189 +350,262 @@ public:
         Mode = GetEnvOrDefault(TEXT("IGI_NIM_MODE"), TEXT("grammar"));
 
         ScriptPath = GetEnvOrDefault(TEXT("IGI_NIM_SCRIPT_PATH"),
-            FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("nim_structured.py"))));
+            FPaths::ConvertRelativePathToFull(
+                FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("nim_structured.py"))));
+
         SystemPromptPath = GetEnvOrDefault(TEXT("IGI_NIM_SYSTEM_PROMPT_PATH"),
-            FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("system_prompt.txt"))));
-        AssistantPromptPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_ASSISTANT_PROMPT_PATH"));
+            FPaths::ConvertRelativePathToFull(
+                FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("system_prompt.txt"))));
+
         GrammarPath = GetEnvOrDefault(TEXT("IGI_NIM_GRAMMAR_PATH"),
-            FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("command_schema.ebnf"))));
-        JsonSchemaPath = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_NIM_JSON_PATH"));
+            FPaths::ConvertRelativePathToFull(
+                FPaths::Combine(FPaths::ProjectDir(), TEXT("ACE"), TEXT("command_schema.ebnf"))));
 
         PythonExe = FPlatformMisc::GetEnvironmentVariable(TEXT("IGI_PYTHON_EXE"));
-        if (PythonExe.IsEmpty()) PythonExe = DefaultPythonExe();
+        if (PythonExe.IsEmpty())
+        {
+            PythonExe = DefaultPythonExe();
+        }
         if (!FPaths::FileExists(PythonExe))
         {
-            UE_LOG(LogIGISDK, Warning, TEXT("[persist] Python not found at %s; will try 'python' in PATH"), *PythonExe);
+            UE_LOG(LogIGISDK, Warning,
+                TEXT("[persist] Python not found at %s; will try 'python' in PATH"), *PythonExe);
             PythonExe = TEXT("python");
         }
     }
 
     bool StartAndPing(double TimeoutSec)
     {
-        FScopeLock _(&Mutex);
-        if (IsRunningInternal()) return true;
+        FScopeLock Lock(&Mutex);
+
+        if (Interactive && Interactive->IsRunning())
+        {
+            return true;
+        }
+
+        bSawPong.store(false, std::memory_order_relaxed);
+        OutputBuffer.Empty();
+        {
+            FString Dummy;
+            while (PendingLines.Dequeue(Dummy)) {}
+        }
 
         FString Args = FString::Printf(
             TEXT("-u %s --serve-stdin --base-url %s --model %s --mode %s"),
             *Quote(ScriptPath), *Quote(BaseUrl), *Quote(Model), *Quote(Mode));
 
-        if (!SystemPromptPath.IsEmpty())    Args += FString::Printf(TEXT(" --system %s"), *Quote(SystemPromptPath));
-        if (!AssistantPromptPath.IsEmpty()) Args += FString::Printf(TEXT(" --assistant %s"), *Quote(AssistantPromptPath));
-        if (!GrammarPath.IsEmpty())         Args += FString::Printf(TEXT(" --grammar %s"), *Quote(GrammarPath));
-        if (!JsonSchemaPath.IsEmpty())      Args += FString::Printf(TEXT(" --json-schema %s"), *Quote(JsonSchemaPath));
-        if (!ApiKey.IsEmpty())              FPlatformMisc::SetEnvironmentVar(TEXT("OPENAI_API_KEY"), *ApiKey);
-
-        FPlatformProcess::CreatePipe(StdOutReadHandle, StdOutWriteHandle);
-        FPlatformProcess::CreatePipe(StdInReadHandle, StdInWriteHandle, true);
-
-        ProcHandle = FPlatformProcess::CreateProc(
-            *PythonExe, *Args,
-            /*bLaunchDetached*/ false,
-            /*bLaunchHidden*/   true,
-            /*bLaunchReallyHidden*/ true,
-            /*OutProcessID*/    nullptr,
-            /*Priority*/        0,
-            /*OptionalWorkingDir*/ nullptr,
-            /*PipeWrite*/       StdOutWriteHandle,
-            /*PipeRead*/        StdInReadHandle);
-
-        if (!ProcHandle.IsValid())
+        if (!SystemPromptPath.IsEmpty())
         {
-            UE_LOG(LogIGISDK, Error, TEXT("[persist] CreateProc failed"));
-            ClosePipes();
+            Args += FString::Printf(TEXT(" --system %s"), *Quote(SystemPromptPath));
+        }
+        if (!GrammarPath.IsEmpty() && Mode == TEXT("grammar"))
+        {
+            Args += FString::Printf(TEXT(" --grammar %s"), *Quote(GrammarPath));
+        }
+
+        if (!ApiKey.IsEmpty())
+        {
+            FPlatformMisc::SetEnvironmentVar(TEXT("OPENAI_API_KEY"), *ApiKey);
+        }
+
+        UE_LOG(LogIGISDK, Log, TEXT("[persist] Launch: %s %s"), *PythonExe, *Args);
+
+        FPlatformMisc::SetEnvironmentVar(TEXT("PYTHONUTF8"), TEXT("1"));
+        FPlatformMisc::SetEnvironmentVar(TEXT("PYTHONIOENCODING"), TEXT("utf-8"));
+        FPlatformMisc::SetEnvironmentVar(TEXT("PYTHONUNBUFFERED"), TEXT("1"));
+
+        Interactive = MakeUnique<FInteractiveProcess>(
+            PythonExe,
+            Args,
+            /*InHidden*/ true,
+            /*LongTime*/ true);
+
+        Interactive->OnOutput().BindLambda([this](const FString& OutputChunk)
+        {
+            TArray<FString> Lines;
+            OutputChunk.ParseIntoArrayLines(Lines, /*bCullEmpty=*/true);
+            if (Lines.Num() == 0)
+            {
+                Lines.Add(OutputChunk);
+            }
+
+            for (const FString& Line : Lines)
+            {
+                FString JsonLine;
+                if (ExtractJsonPayload(Line, JsonLine))
+                {
+                    UE_LOG(LogIGISDK, Verbose, TEXT("[persist][json] %s"), *JsonLine);
+
+                    if (JsonLine.Contains(TEXT("\"pong\"")))
+                    {
+                        bSawPong.store(true, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    {
+                        FScopeLock OutLock(&OutputMutex);
+                        OutputBuffer += JsonLine;
+                        OutputBuffer += TEXT("\n");
+                        PendingLines.Enqueue(JsonLine);
+                    }
+                }
+                else
+                {
+                    UE_LOG(LogIGISDK, VeryVerbose, TEXT("[persist][nonjson] %s"), *SanitizeForLog(Line));
+                }
+            }
+        });
+
+        Interactive->OnCompleted().BindLambda(
+        [this](int32 ReturnCode, bool bCanceling)
+        {
+            UE_LOG(LogIGISDK,
+                Error,
+                TEXT("[persist] Python process completed with code %d (Canceled=%s)"),
+                ReturnCode,
+                bCanceling ? TEXT("true") : TEXT("false")
+                );
+        });
+
+        if (!Interactive->Launch())
+        {
+            UE_LOG(LogIGISDK, Error, TEXT("[persist] Failed to launch python process"));
+            Interactive.Reset();
             return false;
         }
 
-        FPlatformProcess::ClosePipe(nullptr, StdOutWriteHandle);
-        FPlatformProcess::ClosePipe(StdInReadHandle, nullptr);
-        StdOutWriteHandle = nullptr;
-        StdInReadHandle = nullptr;
+        SendLine(TEXT("{\"__cmd\":\"ping\"}"));
 
         const double T0 = FPlatformTime::Seconds();
         while ((FPlatformTime::Seconds() - T0) < TimeoutSec)
         {
-            if (!SendLine(TEXT("{\"__cmd\":\"ping\"}")))
-                return false;
-
-            FString line;
-            if (ReadLine(line, /*LineTimeout*/ 1.0))
+            if (!Interactive->IsRunning())
             {
-                if (line.Contains(TEXT("\"pong\":true")) || line.Contains(TEXT("\"ok\":true")))
-                {
-                    UE_LOG(LogIGISDK, Log, TEXT("[persist] Python ready"));
-                    return true;
-                }
-                else
-                {
-                    UE_LOG(LogIGISDK, Verbose, TEXT("[persist] ping resp: %s"), *line);
-                }
+                UE_LOG(LogIGISDK, Error, TEXT("[persist] Python exited during ping"));
+                return false;
             }
+
+            if (bSawPong.load(std::memory_order_relaxed))
+            {
+                // Drain any queued pong/banner lines so the first real request won't pop them.
+                {
+                    FScopeLock OutLock(&OutputMutex);
+                    OutputBuffer.Empty();
+                    FString Dummy;
+                    while (PendingLines.Dequeue(Dummy)) {}
+                }
+
+                UE_LOG(LogIGISDK, Log, TEXT("[persist] Python ready"));
+                return true;
+            }
+
+            FPlatformProcess::SleepNoStats(0.01f);
         }
 
-        UE_LOG(LogIGISDK, Error, TEXT("[persist] ping timeout"));
+        UE_LOG(LogIGISDK, Error, TEXT("[persist] ping timeout (no pong seen in output)"));
         Stop();
         return false;
     }
 
-    bool IsRunning()
-    {
-        FScopeLock _(&Mutex);
-        return IsRunningInternal();
-    }
-
-    FString RequestJSON(const FString& RequestLine, double TimeoutSec)
-    {
-        FScopeLock _(&Mutex);
-        if (!IsRunningInternal())
-            return TEXT("{\"error\":\"not_running\"}");
-
-        if (!SendLine(RequestLine))
-            return TEXT("{\"error\":\"write_failed\"}");
-
-        FString line;
-        if (!ReadLine(line, TimeoutSec))
-            return TEXT("{\"error\":\"read_timeout\"}");
-
-        return line;
-    }
-
     void Stop()
     {
-        FScopeLock _(&Mutex);
-        if (IsRunningInternal())
+        FScopeLock Lock(&Mutex);
+
+        if (Interactive)
         {
-            SendLine(TEXT("{\"__cmd\":\"quit\"}"));
-            FPlatformProcess::WaitForProc(ProcHandle);
-            FPlatformProcess::CloseProc(ProcHandle);
-            ProcHandle.Reset();
+            Interactive->Cancel(/*KillTree*/ true);
+            Interactive.Reset();
         }
-        ClosePipes();
+
+        OutputBuffer.Empty();
+        FString Dummy;
+        while (PendingLines.Dequeue(Dummy)) {}
+    }
+
+    bool IsRunning() const
+    {
+        return Interactive && Interactive->IsRunning();
+    }
+
+    FString RequestJSON(const FString& UserJsonOneLine, double TimeoutSec)
+    {
+        FScopeLock Lock(&Mutex);
+
+        if (!Interactive || !Interactive->IsRunning())
+        {
+            return TEXT("{\"error\":\"not_running\"}");
+        }
+
+        {
+            FScopeLock OutLock(&OutputMutex);
+            OutputBuffer.Empty();
+            FString Dummy;
+            while (PendingLines.Dequeue(Dummy)) {}
+        }
+
+        SendLine(UserJsonOneLine);
+        FString Line;
+        if (PopLine(Line, TimeoutSec))
+        {
+            return Line;
+        }
+
+        return TEXT("{\"error\":\"timeout\"}");
     }
 
 private:
+    void SendLine(const FString& Line)
+    {
+        if (!Interactive) return;
+        const FString WithNL = Line + TEXT("\n");
+        Interactive->SendWhenReady(WithNL);
+    }
+
+    bool PopLine(FString& Out, double TimeoutSec)
+    {
+        const double T0 = FPlatformTime::Seconds();
+        for (;;)
+        {
+            {
+                FScopeLock OutLock(&OutputMutex);
+                if (PendingLines.Dequeue(Out))
+                {
+                    return true;
+                }
+            }
+
+            if ((FPlatformTime::Seconds() - T0) >= TimeoutSec)
+            {
+                return false;
+            }
+
+            FPlatformProcess::SleepNoStats(0.005f);
+        }
+    }
+
+    static FString Quote(const FString& S)
+    {
+        return FString::Printf(TEXT("\"%s\""), *S.Replace(TEXT("\""), TEXT("\\\"")));
+    }
+
     static FString GetEnvOrDefault(const TCHAR* Name, const FString& Fallback)
     {
         const FString V = FPlatformMisc::GetEnvironmentVariable(Name);
         return V.IsEmpty() ? Fallback : V;
     }
 
-    bool IsRunningInternal()
-    {
-        return ProcHandle.IsValid() && FPlatformProcess::IsProcRunning(ProcHandle);
-    }
-
-    void ClosePipes()
-    {
-        if (StdOutReadHandle) { FPlatformProcess::ClosePipe(StdOutReadHandle, nullptr); StdOutReadHandle = nullptr; }
-        if (StdInWriteHandle) { FPlatformProcess::ClosePipe(nullptr, StdInWriteHandle); StdInWriteHandle = nullptr; }
-
-        if (StdInReadHandle) { FPlatformProcess::ClosePipe(StdInReadHandle, nullptr); StdInReadHandle = nullptr; }
-        if (StdOutWriteHandle) { FPlatformProcess::ClosePipe(nullptr, StdOutWriteHandle); StdOutWriteHandle = nullptr; }
-    }
-
-    bool SendLine(const FString& Line)
-    {
-        if (!StdInWriteHandle) return false;
-        const FString WithNL = Line + TEXT("\n");
-        FTCHARToUTF8 Utf8(*WithNL);
-        return FPlatformProcess::WritePipe(StdInWriteHandle, (uint8*)Utf8.Get(), Utf8.Length());
-    }
-
-    bool ReadLine(FString& OutLine, double TimeoutSec)
-    {
-        if (!StdOutReadHandle) return false;
-
-        FString Acc;
-        const double T0 = FPlatformTime::Seconds();
-        while ((FPlatformTime::Seconds() - T0) < TimeoutSec)
-        {
-            const FString Chunk = FPlatformProcess::ReadPipe(StdOutReadHandle);
-            if (!Chunk.IsEmpty())
-            {
-                Acc += Chunk;
-                int32 NewlineIdx;
-                if (Acc.FindChar(TEXT('\n'), NewlineIdx))
-                {
-                    OutLine = Acc.Left(NewlineIdx);
-                    return true;
-                }
-            }
-            FPlatformProcess::SleepNoStats(0.005);
-        }
-        return false;
-    }
-
 private:
-    FString PythonExe, ScriptPath, BaseUrl, ApiKey, Model, Mode;
-    FString SystemPromptPath, AssistantPromptPath, GrammarPath, JsonSchemaPath;
-
-    FProcHandle ProcHandle;
-    void* StdOutReadHandle = nullptr;
-    void* StdOutWriteHandle = nullptr;
-    void* StdInReadHandle = nullptr;
-    void* StdInWriteHandle = nullptr;
-
+    std::atomic<bool> bSawPong{ false };
     mutable FCriticalSection Mutex;
+
+    FString BaseUrl, ApiKey, Model, Mode;
+    FString ScriptPath, SystemPromptPath, GrammarPath, JsonSchemaPath, PythonExe;
+
+    TUniquePtr<FInteractiveProcess> Interactive;
+
+    mutable FCriticalSection OutputMutex;
+    FString OutputBuffer;
+    TQueue<FString> PendingLines;
 };
 
 class FIGIGPT::Impl
@@ -486,11 +683,17 @@ public:
 
         PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
         PythonClient->ConfigureFromEnv();
+
+        PythonPersistent = MakeUnique<FPythonPersistentClient>();
+        PythonPersistent->StartAndPing(30.0f);
     }
 
     virtual ~Impl()
     {
         PythonClient.Reset();
+
+        if (PythonPersistent.IsValid())
+            PythonPersistent->Stop();
 
         if (GPTInstance != nullptr)
         {
@@ -505,27 +708,17 @@ public:
         }
     }
 
-    void WarmUpPython(double TimeoutSec)
+    void StartPersistentPython(double TimeoutSec)
     {
-        if (!PythonClient.IsValid())
-        {
-            PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
-            PythonClient->ConfigureFromEnv();
-        }
+        if (!PythonPersistent.IsValid())
+            PythonPersistent = MakeUnique<FPythonPersistentClient>();
+        PythonPersistent->StartAndPing(TimeoutSec);
+    }
 
-        UE_LOG(LogIGISDK, Log, TEXT("[warmup] Starting Python warm-up (timeout=%.1fs)"), TimeoutSec);
-
-        const FString WarmupReq = TEXT("{\"user\":\"__warmup__\"}");
-        const FString Resp = PythonClient->RequestSingleShotJSON(WarmupReq, /*GrammarPath*/TEXT(""), TimeoutSec);
-
-        if (Resp.StartsWith(TEXT("{\"error\"")))
-        {
-            UE_LOG(LogIGISDK, Warning, TEXT("[warmup] Python warm-up returned: %s"), *Resp);
-        }
-        else
-        {
-            UE_LOG(LogIGISDK, Log, TEXT("[warmup] Python warm-up OK"));
-        }
+    void StopPersistentPython()
+    {
+        if (PythonPersistent.IsValid())
+            PythonPersistent->Stop();
     }
 
     FString Evaluate(const FString& UserPrompt)
@@ -615,30 +808,38 @@ public:
         return response;
     }
 
-    void StartPersistentPython(double TimeoutSec)
-    {
-        if (!PythonPersistent.IsValid())
-            PythonPersistent = MakeUnique<FPythonPersistentClient>();
-        PythonPersistent->StartAndPing(TimeoutSec);
-    }
-
-    void StopPersistentPython()
-    {
-        if (PythonPersistent.IsValid())
-            PythonPersistent->Stop();
-    }
-
     FString EvaluateStructuredWithGrammar(const FString& UserPrompt, const FString& GrammarPath)
     {
+        TSharedPtr<FJsonObject> Obj;
+        const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(UserPrompt);
+        FJsonSerializer::Deserialize(Reader, Obj);
+
+        if (!GrammarPath.IsEmpty())
+        {
+            Obj->SetStringField(TEXT("grammar_path"), GrammarPath);
+        }
+
+        FString OneLine;
+        const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OneLine);
+        FJsonSerializer::Serialize(Obj.ToSharedRef(), Writer);
+        OneLine.ReplaceInline(TEXT("\r"), TEXT(""));
+        OneLine.ReplaceInline(TEXT("\n"), TEXT(""));
+
+        if (PythonPersistent.IsValid() && PythonPersistent->IsRunning())
+        {
+            FString Resp = PythonPersistent->RequestJSON(OneLine, 60.0);
+            if (!Resp.IsEmpty() && !Resp.StartsWith(TEXT("{\"error\"")))
+            {
+                return Resp;
+            }
+            UE_LOG(LogIGISDK, Warning, TEXT("[gpt] persistent failed, falling back: %s"), *Resp);
+        }
+
         if (!PythonClient.IsValid())
         {
             PythonClient = MakeUnique<FPythonMonitoredSingleShot>();
             PythonClient->ConfigureFromEnv();
         }
-
-        FString OneLine = UserPrompt;
-        OneLine.ReplaceInline(TEXT("\r"), TEXT(" "));
-        OneLine.ReplaceInline(TEXT("\n"), TEXT(" "));
 
         return PythonClient->RequestSingleShotJSON(OneLine, GrammarPath, /*TimeoutSec=*/60.0);
     }
@@ -664,24 +865,9 @@ FIGIGPT::FIGIGPT(FIGIModule* IGIModule)
 
 FIGIGPT::~FIGIGPT() {}
 
-void FIGIGPT::WarmUpPython(double TimeoutSec)
-{
-    Pimpl->WarmUpPython(TimeoutSec);
-}
-
 FString FIGIGPT::Evaluate(const FString& UserPrompt)
 {
     return Pimpl->Evaluate(UserPrompt);
-}
-
-void FIGIGPT::StartPersistentPython(double TimeoutSec) 
-{ 
-    Pimpl->StartPersistentPython(TimeoutSec); 
-}
-
-void FIGIGPT::StopPersistentPython() 
-{
-    Pimpl->StopPersistentPython(); 
 }
 
 FString FIGIGPT::EvaluateStructuredWithGrammar(const FString& UserPrompt, const FString& GrammarPath)

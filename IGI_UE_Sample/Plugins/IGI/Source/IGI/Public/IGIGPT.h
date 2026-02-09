@@ -15,12 +15,10 @@ public:
     FIGIGPT(FIGIModule* IGIModule);
     virtual ~FIGIGPT();
 
-    void WarmUpPython(double TimeoutSec = 60.0);
-
-    FString Evaluate(const FString& UserPrompt);
-
     void StartPersistentPython(double TimeoutSec = 30.0);
     void StopPersistentPython();
+
+    FString Evaluate(const FString& UserPrompt);
 
     FString EvaluateStructuredWithGrammar(const FString& UserPrompt, const FString& GrammarPath);
 

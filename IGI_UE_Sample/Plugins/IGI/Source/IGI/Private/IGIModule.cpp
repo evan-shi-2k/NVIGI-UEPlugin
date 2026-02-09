@@ -35,12 +35,36 @@ public:
         FString BaseDir = IPluginManager::Get().FindPlugin("IGI")->GetBaseDir();
         IGICoreLibraryPath = FPaths::Combine(*BaseDir, TEXT("ThirdParty/nvigi_pack/bin/x64/nvigi.core.framework.dll"));
         IGIModelsPath = FPaths::Combine(*BaseDir, TEXT("ThirdParty/nvigi_pack/data/nvigi.models"));
+
+        PostEngineInitHandle = FCoreDelegates::OnPostEngineInit.AddLambda([this]()
+        {
+            AsyncTask(ENamedThreads::GameThread, [this]()
+                {
+                    FIGIModule* Module = FModuleManager::GetModulePtr<FIGIModule>("IGI");
+                    if (Module)
+                    {
+                        BeginInitClients(Module);
+
+                        // Optional: warm-up to pay cost at boot, not at first user action
+                        // if (bClientsReady) { GPT->Evaluate(TEXT("ping")); }
+                    }
+                });
+        });
     }
 
     void ShutdownModule()
     {
         // This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
         // we call this function before unloading the module.
+        if (PostEngineInitHandle.IsValid())
+        {
+            FCoreDelegates::OnPostEngineInit.Remove(PostEngineInitHandle);
+            PostEngineInitHandle.Reset();
+        }
+
+        GPT.Reset();
+        ASR.Reset();
+        Core.Reset();
 
         if (Core)
         {
@@ -84,25 +108,54 @@ public:
 
     FIGIGPT* GetGPT(FIGIModule* module)
     {
-        FScopeLock Lock(&CS);
+        /*FScopeLock Lock(&CS);
         if(!GPT.IsValid())
         {
             GPT = MakeUnique<FIGIGPT>(module);
         }
-        return GPT.Get();
+        return GPT.Get();*/
+
+        FScopeLock Lock(&CS);
+        return bClientsReady ? GPT.Get() : nullptr;
     }
 
     FIGIASR* GetASR(FIGIModule* Module)
     {
-        FScopeLock Lock(&CS);
+        /*FScopeLock Lock(&CS);
         if (!ASR.IsValid())
         {
             ASR = MakeUnique<FIGIASR>(Module);
         }
-        return ASR.Get();
+        return ASR.Get();*/
+
+        FScopeLock Lock(&CS);
+        return bClientsReady ? ASR.Get() : nullptr;
     }
 
+    bool AreClientsReady() const { return bClientsReady; }
+
 private:
+    void BeginInitClients(FIGIModule* Module)
+    {
+        FScopeLock Lock(&CS);
+        if (bClientsInitStarted) return;
+        bClientsInitStarted = true;
+
+        if (!Core.IsValid())
+        {
+            Core = MakeUnique<FIGICore>(IGICoreLibraryPath);
+        }
+
+        GPT = MakeUnique<FIGIGPT>(Module);
+        ASR = MakeUnique<FIGIASR>(Module);
+
+        bClientsReady = GPT.IsValid() && ASR.IsValid();
+    }
+
+    bool bClientsInitStarted = false;
+    bool bClientsReady = false;
+    FDelegateHandle PostEngineInitHandle;
+
     TUniquePtr<FIGICore> Core;
     TUniquePtr<FIGIGPT> GPT;
     TUniquePtr<FIGIASR> ASR;
@@ -119,13 +172,6 @@ void FIGIModule::StartupModule()
     Pimpl = MakePimpl<FIGIModule::Impl>();
     Pimpl->StartupModule();
     UE_LOG(LogIGISDK, Log, TEXT("IGI module started"));
-
-    //FIGIGPT* GPT = Pimpl->GetGPT(this);
-    //if (GPT)
-    //{
-    //    GPT->StartPersistentPython(/*TimeoutSec=*/30.0);
-    //    GPT->WarmUpPython(/*TimeoutSec=*/30.0);
-    //}
 }
 
 void FIGIModule::ShutdownModule()

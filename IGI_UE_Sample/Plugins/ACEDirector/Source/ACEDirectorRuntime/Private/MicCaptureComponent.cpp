@@ -12,7 +12,7 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogACEMicCapture, Log, All);
 
-static constexpr int32 MIN_AUDIO_SAMPLES = 8000; // minimum samples to send to ASR
+static constexpr int32 MIN_AUDIO_SAMPLES = 8000;
 
 UMicCaptureComponent::UMicCaptureComponent()
 {
